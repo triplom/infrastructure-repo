@@ -1,11 +1,14 @@
 name: Deploy Applications
 on:
+  # Standard triggers for direct pushes
   push:
     branches:
       - main
     paths:
       - 'apps/**'
       - '.github/workflows/deploy-apps.yaml'
+  
+  # Manual trigger
   workflow_dispatch:
     inputs:
       environment:
@@ -21,18 +24,75 @@ on:
         description: 'Application to deploy (empty for all)'
         required: false
         default: ''
+  
+  # New trigger for cross-repository integration
+  repository_dispatch:
+    types:
+      - app-deployment-request
 
 jobs:
+  validate:
+    name: Validate Deployment Request
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.set-env.outputs.environment }}
+      application: ${{ steps.set-app.outputs.application }}
+    steps:
+      - name: Set Environment
+        id: set-env
+        run: |
+          # For standard trigger or workflow_dispatch
+          if [[ "${{ github.event_name }}" != "repository_dispatch" ]]; then
+            echo "environment=${{ github.event.inputs.environment || 'dev' }}" >> $GITHUB_OUTPUT
+          else
+            # For repository_dispatch
+            ENV="${{ github.event.client_payload.environment || 'dev' }}"
+            echo "environment=$ENV" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set Application
+        id: set-app
+        run: |
+          # For standard trigger or workflow_dispatch
+          if [[ "${{ github.event_name }}" != "repository_dispatch" ]]; then
+            echo "application=${{ github.event.inputs.application }}" >> $GITHUB_OUTPUT
+          else
+            # For repository_dispatch
+            APP="${{ github.event.client_payload.app_name }}"
+            echo "application=$APP" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Display Deployment Info
+        run: |
+          echo "🚀 Deployment request received:"
+          echo "• Environment: ${{ steps.set-env.outputs.environment }}"
+          echo "• Application: ${{ steps.set-app.outputs.application || 'ALL' }}"
+          echo "• Trigger: ${{ github.event_name }}"
+          if [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
+            echo "• Source Repository: ${{ github.event.client_payload.repository }}"
+            echo "• Version: ${{ github.event.client_payload.version }}"
+          fi
+
   deploy:
     name: Deploy Applications
-    runs-on: ubuntu-latest
-    environment: ${{ github.event.inputs.environment || 'dev' }}
+    needs: validate
+    runs-on: self-hosted
+    environment: ${{ needs.validate.outputs.environment }}
     env:
-      ENV: ${{ github.event.inputs.environment || 'dev' }}
+      ENV: ${{ needs.validate.outputs.environment }}
+      APP: ${{ needs.validate.outputs.application }}
     
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+      
+      - name: Checkout External App Repository
+        if: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.repository != '' }}
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.client_payload.repository }}
+          ref: ${{ github.event.client_payload.ref || github.event.client_payload.version || 'main' }}
+          path: external-app
       
       - name: Setup kubectl
         uses: azure/setup-kubectl@v3
@@ -42,117 +102,276 @@ jobs:
         with:
           kustomize-version: "4.5.7"
       
+      - name: Setup Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: 'v3.13.3'
+      
       - name: Setup Kubeconfig
         run: |
+          # Create logs directory
+          mkdir -p logs
+          
           # Create temporary kubeconfig file
           TEMP_KUBECONFIG=$(mktemp)
-          echo "${{ secrets[format('KUBECONFIG_{0}', env.ENV)] }}" | base64 -d > "${TEMP_KUBECONFIG}"
-          chmod 600 "${TEMP_KUBECONFIG}"
           
-          # Set KUBECONFIG environment variable to the temporary file
+          # Get the appropriate kubeconfig based on environment
+          if [ "$ENV" = "dev" ]; then
+            echo "${{ secrets.KUBECONFIG_DEV }}" | base64 -d > "${TEMP_KUBECONFIG}"
+          elif [ "$ENV" = "qa" ]; then
+            echo "${{ secrets.KUBECONFIG_QA }}" | base64 -d > "${TEMP_KUBECONFIG}"
+          elif [ "$ENV" = "prod" ]; then
+            echo "${{ secrets.KUBECONFIG_PROD }}" | base64 -d > "${TEMP_KUBECONFIG}"
+          else
+            echo "::error::Unknown environment: $ENV"
+            exit 1
+          fi
+          
+          chmod 600 "${TEMP_KUBECONFIG}"
           echo "KUBECONFIG=${TEMP_KUBECONFIG}" >> $GITHUB_ENV
           
           # Verify kubeconfig
-          if ! kubectl config get-contexts; then
+          echo "Verifying Kubernetes configuration..."
+          if ! kubectl config get-contexts > logs/kubeconfig-contexts.txt 2>&1; then
             echo "::error::Failed to get kubectl contexts. Check KUBECONFIG_${ENV} secret."
+            cat logs/kubeconfig-contexts.txt
             exit 1
           fi
           
           # Show which context we're using
           CURRENT_CONTEXT=$(kubectl config current-context)
           echo "Using Kubernetes context: $CURRENT_CONTEXT"
+          echo "cluster-context=$CURRENT_CONTEXT" >> logs/deployment-info.txt
           
           # Test API server connectivity
           echo "Testing API server connectivity..."
-          if ! kubectl cluster-info; then
-            echo "::warning::Cannot connect to Kubernetes API server directly. All kubectl commands will use --validate=false."
+          if ! kubectl cluster-info > logs/cluster-info.txt 2>&1; then
+            echo "::warning::Cannot connect to Kubernetes API server directly. Using --validate=false flag."
+            cat logs/cluster-info.txt
+          fi
+
+      - name: Prepare External App (if applicable)
+        if: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.repository != '' }}
+        run: |
+          APP="${{ needs.validate.outputs.application }}"
+          APP_VERSION="${{ github.event.client_payload.version }}"
+          APP_PATH="external-app"
+          
+          echo "📦 Preparing external application: $APP"
+          echo "📋 Version: $APP_VERSION"
+          
+          # Check if we need to copy files to the apps directory
+          if [ -d "$APP_PATH/k8s" ] || [ -d "$APP_PATH/deploy" ] || [ -d "$APP_PATH/manifests" ]; then
+            echo "Found deployment manifests in external repository"
+            
+            # Ensure app directory exists
+            mkdir -p "apps/$APP/overlays/$ENV"
+            
+            # Find the deployment directory in external repo
+            DEPLOY_DIR=""
+            for dir in "k8s" "deploy" "manifests"; do
+              if [ -d "$APP_PATH/$dir" ]; then
+                DEPLOY_DIR="$APP_PATH/$dir"
+                break
+              fi
+            done
+            
+            # Copy deployment files
+            if [ -n "$DEPLOY_DIR" ]; then
+              echo "Copying manifests from $DEPLOY_DIR to apps/$APP"
+              cp -r "$DEPLOY_DIR"/* "apps/$APP/"
+              
+              # Replace version tags if needed
+              find "apps/$APP" -type f -name "*.yaml" -exec sed -i "s/\${VERSION}/$APP_VERSION/g" {} \;
+              find "apps/$APP" -type f -name "*.yaml" -exec sed -i "s/\${TAG}/$APP_VERSION/g" {} \;
+            fi
+          else
+            echo "No standard deployment directory found in external repo"
+            # Check for custom deploy script
+            if [ -f "$APP_PATH/deploy.sh" ]; then
+              echo "Found deploy.sh script in external repository"
+              chmod +x "$APP_PATH/deploy.sh"
+            fi
           fi
 
       - name: Deploy Applications
         run: |
-          APP="${{ github.event.inputs.application }}"
-          FAILED_APPS=""
+          # Create log directory for deployment logs
+          mkdir -p logs
           
           # Function to deploy a single app
           deploy_app() {
             local app=$1
             local env=$2
+            local deploy_log="logs/deploy-${app}-${env}.log"
+            local error_log="logs/error-${app}-${env}.log"
             
-            echo "============================================="
-            echo "Deploying $app to $env environment"
-            echo "============================================="
+            echo "=============================================" | tee -a "$deploy_log"
+            echo "Deploying $app to $env environment" | tee -a "$deploy_log"
+            echo "Started: $(date)" | tee -a "$deploy_log"
+            echo "=============================================" | tee -a "$deploy_log"
             
-            # Check if overlay exists
-            if [ ! -d "apps/$app/overlays/$env" ]; then
-              echo "::error::Overlay not found: apps/$app/overlays/$env"
+            # Check if this is an external app deployment
+            if [[ "${{ github.event_name }}" == "repository_dispatch" && "$app" == "${{ github.event.client_payload.app_name }}" ]]; then
+              local external_deploy=true
+              local app_path="external-app"
+              
+              # If external app has a deploy script, use it
+              if [ -f "$app_path/deploy.sh" ]; then
+                echo "Using external repository's deploy.sh script" | tee -a "$deploy_log"
+                (cd "$app_path" && ./deploy.sh "$env" "${{ github.event.client_payload.version }}") 2> >(tee -a "$error_log" >&2) | tee -a "$deploy_log"
+                return $?
+              fi
+            fi
+            
+            # First check if app directory exists
+            if [ ! -d "apps/$app" ]; then
+              echo "::error::Application directory not found: apps/$app" | tee -a "$error_log"
               return 1
             fi
             
-            # Create namespace if it doesn't exist
-            echo "Creating namespace $app-$env if needed..."
-            kubectl create namespace $app-$env --dry-run=client -o yaml | kubectl apply --validate=false -f -
+            # Deployment methods in order of preference
             
-            # Apply Kustomize overlay
-            echo "Applying Kustomize overlay..."
-            if ! kubectl apply --validate=false -k apps/$app/overlays/$env; then
-              echo "::error::Failed to deploy $app to $env"
+            # 1. Check if app has its own deploy script
+            if [ -f "apps/$app/deploy.sh" ]; then
+              echo "Found app-specific deploy script" | tee -a "$deploy_log"
+              chmod +x "apps/$app/deploy.sh"
+              (cd "apps/$app" && ./deploy.sh "$env") 2> >(tee -a "$error_log" >&2) | tee -a "$deploy_log"
+              return $?
+            fi
+            
+            # 2. Helm chart detection
+            if [ -d "apps/$app/chart" ] || [ -f "apps/$app/Chart.yaml" ]; then
+              echo "Detected Helm chart" | tee -a "$deploy_log"
+              
+              # Create namespace
+              kubectl create namespace $app-$env --dry-run=client -o yaml | kubectl apply --validate=false -f - 2> >(tee -a "$error_log" >&2) | tee -a "$deploy_log"
+              
+              # Determine chart path
+              local chart_path="apps/$app"
+              if [ -d "apps/$app/chart" ]; then
+                chart_path="apps/$app/chart"
+              fi
+              
+              # Check for env-specific values
+              local values_args=""
+              if [ -f "apps/$app/values-$env.yaml" ]; then
+                values_args="-f apps/$app/values-$env.yaml"
+              fi
+              
+              # Deploy with Helm
+              echo "Deploying with Helm" | tee -a "$deploy_log"
+              helm upgrade --install "$app" "$chart_path" \
+                --namespace "$app-$env" \
+                $values_args \
+                --atomic \
+                --timeout 5m \
+                2> >(tee -a "$error_log" >&2) | tee -a "$deploy_log"
+              return $?
+            fi
+            
+            # 3. Kustomize overlay
+            if [ -d "apps/$app/overlays/$env" ]; then
+              echo "Using Kustomize overlay" | tee -a "$deploy_log"
+              
+              # Create namespace if it doesn't exist
+              kubectl create namespace $app-$env --dry-run=client -o yaml | kubectl apply --validate=false -f - 2> >(tee -a "$error_log" >&2) | tee -a "$deploy_log"
+              
+              # Apply Kustomize overlay
+              kubectl apply --validate=false -k "apps/$app/overlays/$env" 2> >(tee -a "$error_log" >&2) | tee -a "$deploy_log"
+              if [ ${PIPESTATUS[0]} -ne 0 ]; then
+                echo "::error::Failed to deploy $app with Kustomize" | tee -a "$error_log"
+                return 1
+              fi
+            # 4. Plain YAML files
+            elif [ -d "apps/$app/$env" ] || [ -d "apps/$app/environments/$env" ]; then
+              echo "Using plain YAML files" | tee -a "$deploy_log"
+              
+              # Determine manifest directory
+              local manifest_dir="apps/$app/$env"
+              if [ -d "apps/$app/environments/$env" ]; then
+                manifest_dir="apps/$app/environments/$env"
+              fi
+              
+              # Create namespace
+              kubectl create namespace $app-$env --dry-run=client -o yaml | kubectl apply --validate=false -f - 2> >(tee -a "$error_log" >&2) | tee -a "$deploy_log"
+              
+              # Apply all yaml files
+              kubectl apply --validate=false -f "$manifest_dir" 2> >(tee -a "$error_log" >&2) | tee -a "$deploy_log"
+              if [ ${PIPESTATUS[0]} -ne 0 ]; then
+                echo "::error::Failed to deploy $app with plain YAML" | tee -a "$error_log"
+                return 1
+              fi
+            else
+              echo "::error::No supported deployment method found for $app in $env" | tee -a "$error_log"
               return 1
             fi
             
-            # Find all deployments in the namespace to check status
-            echo "Checking deployments in namespace $app-$env..."
+            # Wait for deployments to become ready
+            echo "Checking deployments in namespace $app-$env..." | tee -a "$deploy_log"
             DEPLOYMENTS=$(kubectl get deployments -n $app-$env -o name 2>/dev/null || echo "")
             
             if [ -z "$DEPLOYMENTS" ]; then
-              echo "::warning::No deployments found for $app in namespace $app-$env"
+              echo "::warning::No deployments found for $app in namespace $app-$env" | tee -a "$deploy_log"
               # Show other resources that might have been created
-              echo "Resources created:"
-              kubectl get all -n $app-$env
+              echo "Resources created:" | tee -a "$deploy_log"
+              kubectl get all -n $app-$env | tee -a "$deploy_log"
               return 0
             fi
             
             # Wait for each deployment to roll out
             for DEPLOYMENT in $DEPLOYMENTS; do
-              echo "Waiting for rollout of $DEPLOYMENT..."
-              if ! kubectl rollout status $DEPLOYMENT -n $app-$env --timeout=300s; then
-                echo "::error::Rollout for $DEPLOYMENT failed or timed out"
-                kubectl get pods -n $app-$env -l app=$app
+              echo "Waiting for rollout of $DEPLOYMENT..." | tee -a "$deploy_log"
+              if ! kubectl rollout status $DEPLOYMENT -n $app-$env --timeout=300s 2> >(tee -a "$error_log" >&2) | tee -a "$deploy_log"; then
+                echo "::error::Rollout for $DEPLOYMENT failed or timed out" | tee -a "$error_log"
+                kubectl get pods -n $app-$env -l app=$app | tee -a "$deploy_log"
                 return 1
               fi
             done
             
-            echo "✅ $app successfully deployed to $env"
+            echo "✅ $app successfully deployed to $env" | tee -a "$deploy_log"
+            echo "Completed: $(date)" | tee -a "$deploy_log"
             return 0
           }
+          
+          FAILED_APPS=""
           
           # Deploy either specific app or all apps
           if [ -n "$APP" ]; then
             # Deploy specific app
             if ! deploy_app "$APP" "${ENV}"; then
               echo "::error::Deployment of $APP failed"
-              exit 1
+              FAILED_APPS="$APP"
             fi
           else
             # Deploy all apps
             for APP_DIR in apps/*/; do
-              APP=$(basename $APP_DIR)
-              if ! deploy_app "$APP" "${ENV}"; then
-                FAILED_APPS="$FAILED_APPS $APP"
-                echo "::warning::Failed to deploy $APP, continuing with others"
+              APP_NAME=$(basename $APP_DIR)
+              if ! deploy_app "$APP_NAME" "${ENV}"; then
+                FAILED_APPS="$FAILED_APPS $APP_NAME"
+                echo "::warning::Failed to deploy $APP_NAME, continuing with others"
               fi
             done
-            
-            # Report any failures
-            if [ -n "$FAILED_APPS" ]; then
-              echo "::error::The following applications failed to deploy:$FAILED_APPS"
-              exit 1
-            else
-              echo "✅ All applications successfully deployed to ${ENV}"
-            fi
           fi
+          
+          # Report any failures
+          if [ -n "$FAILED_APPS" ]; then
+            echo "::error::The following applications failed to deploy:$FAILED_APPS"
+            exit 1
+          else
+            echo "✅ All requested applications successfully deployed to ${ENV}"
+          fi
+      
+      - name: Upload Deployment Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-logs-${{ needs.validate.outputs.environment }}
+          path: logs/
+          retention-days: 7
       
       - name: Cleanup
         if: always()
         run: |
-          # Nothing to clean up when using temporary files
-          # They're automatically removed when the workflow finishes
+          # Remove any sensitive files
+          rm -f $KUBECONFIG
