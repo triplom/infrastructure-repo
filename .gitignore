@@ -40,3 +40,12 @@ var/
 
 # Base64 encoded secrets
 *-base64.txt
+
+# GitHub Actions Runner files
+actions-runner/
+.runner
+.credentials
+.credentials_rsaparams
+.env
+.path
+.github/workflows/.env
