@@ -79,29 +79,47 @@ jobs:
           ENV: ${{ steps.set-env.outputs.environment }}
         run: |
           # Dynamically check for the correct secret based on environment
-          SECRET_EXISTS="false"
-          if [ "$ENV" = "dev" ] && [ -n "${{ secrets.KUBECONFIG_DEV }}" ]; then
-            SECRET_EXISTS="true"
-          elif [ "$ENV" = "qa" ] && [ -n "${{ secrets.KUBECONFIG_QA }}" ]; then
-            SECRET_EXISTS="true"
-          elif [ "$ENV" = "prod" ] && [ -n "${{ secrets.KUBECONFIG_PROD }}" ]; then
-            SECRET_EXISTS="true"
-          fi
-          
-          if [ "$SECRET_EXISTS" != "true" ]; then
-            echo "::error::KUBECONFIG_${ENV^^} secret is not set for environment $ENV"
+          SECRET_NAME="KUBECONFIG_${ENV^^}"
+          if [ "$ENV" = "dev" ] && [ -z "${{ secrets.KUBECONFIG_DEV }}" ]; then
+            echo "::error::${SECRET_NAME} secret is not set for environment $ENV"
+            exit 1
+          elif [ "$ENV" = "qa" ] && [ -z "${{ secrets.KUBECONFIG_QA }}" ]; then
+            echo "::error::${SECRET_NAME} secret is not set for environment $ENV"
+            exit 1
+          elif [ "$ENV" = "prod" ] && [ -z "${{ secrets.KUBECONFIG_PROD }}" ]; then
+            echo "::error::${SECRET_NAME} secret is not set for environment $ENV"
             exit 1
           else
-            echo "KUBECONFIG_${ENV^^} secret confirmed for environment $ENV"
+            echo "${SECRET_NAME} secret confirmed for environment $ENV"
           fi
 
   deploy:
     name: Deploy Infrastructure
     needs: validate-prerequisites
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     environment: ${{ needs.validate-prerequisites.outputs.environment }}
     
     steps:
+      - name: Verify Self-Hosted Runner
+        run: |
+          echo "Self-hosted runner details:"
+          echo "• Hostname: $(hostname)"
+          echo "• Working directory: $(pwd)"
+          echo "• User: $(whoami)"
+          
+          # Check for required tools
+          for cmd in kubectl helm kustomize; do
+            if ! command -v $cmd &> /dev/null; then
+              echo "::warning::$cmd not found on this runner. Will attempt to install."
+            else
+              echo "✅ $cmd is available: $($cmd version --client 2>/dev/null || $cmd version 2>/dev/null || echo 'version unknown')"
+            fi
+          done
+          
+          # Display runner environment
+          echo "Network connectivity:"
+          ip addr | grep -E "inet .* scope global" || echo "No global IP found"
+      
       - name: Checkout Repository
         uses: actions/checkout@v4
       
@@ -150,6 +168,14 @@ jobs:
             exit 1
           fi
           
+          # Display basic information (without showing secrets)
+          echo "Examining kubeconfig structure:"
+          kubectl config view --minify | grep -v -E "certificate|token"
+          
+          # Show available contexts
+          echo "Available contexts:"
+          kubectl config get-contexts
+          
           # Validate kubeconfig works
           if ! kubectl config get-contexts > /dev/null 2>&1; then
             echo "::error::Invalid KUBECONFIG file format"
@@ -171,6 +197,9 @@ jobs:
           KUBECTL_FLAGS: "--validate=false"
           KUBECTL_CONTEXT: ${{ steps.kubeconfig.outputs.current-context }}
         run: |
+          # Create log directory
+          mkdir -p logs
+          
           for component in ${{ needs.validate-prerequisites.outputs.components }}; do
             echo "###################################################"
             echo "# Deploying $component to $ENV environment"
@@ -179,16 +208,23 @@ jobs:
             component_dir="infrastructure/$component"
             deploy_script="$component_dir/base/deploy.sh"
             
-            # Set up environment variables for the script
-            export COMPONENT_ENV="$ENV"
+            # Create log files for this component
+            DEPLOY_LOG="logs/deployment-${component}-${ENV}.log"
+            ERROR_LOG="logs/error-${component}-${ENV}.log"
             
-            # Execute deployment with timeout and error handling
-            timeout 300s $deploy_script "$ENV" || {
+            # Log start time
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting deployment of $component to $ENV" | tee -a "$DEPLOY_LOG"
+            
+            # Execute deployment with logging
+            {
+              export COMPONENT_ENV="$ENV"
+              timeout 300s $deploy_script "$ENV" 2> >(tee -a "$ERROR_LOG" >&2)
+            } | tee -a "$DEPLOY_LOG" || {
               EXIT_CODE=$?
               if [ $EXIT_CODE -eq 124 ]; then
-                echo "::error::$component deployment timed out after 5 minutes"
+                echo "::error::$component deployment timed out after 5 minutes" | tee -a "$ERROR_LOG"
               else
-                echo "::error::$component deployment failed with exit code $EXIT_CODE"
+                echo "::error::$component deployment failed with exit code $EXIT_CODE" | tee -a "$ERROR_LOG"
               fi
               exit $EXIT_CODE
             }
@@ -196,16 +232,18 @@ jobs:
             echo "Verifying $component deployment..."
             case "$component" in
               cert-manager)
-                kubectl get deployment,pod -n cert-manager --selector=app.kubernetes.io/instance=cert-manager
+                kubectl get deployment,pod -n cert-manager --selector=app.kubernetes.io/instance=cert-manager | tee -a "$DEPLOY_LOG"
+                echo "Waiting for cert-manager to be available..." | tee -a "$DEPLOY_LOG"
                 kubectl wait --for=condition=available --timeout=60s deployment/cert-manager -n cert-manager || true
                 ;;
               ingress-nginx)
-                kubectl get deployment,pod -n ingress-nginx --selector=app.kubernetes.io/instance=ingress-nginx
+                kubectl get deployment,pod -n ingress-nginx --selector=app.kubernetes.io/instance=ingress-nginx | tee -a "$DEPLOY_LOG"
+                echo "Waiting for ingress-nginx to be available..." | tee -a "$DEPLOY_LOG"
                 kubectl wait --for=condition=available --timeout=60s deployment/ingress-nginx-controller -n ingress-nginx || true
                 ;;
             esac
             
-            echo "$component deployment completed"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] $component deployment completed" | tee -a "$DEPLOY_LOG"
             echo "---------------------------------------------------"
           done
           
@@ -215,10 +253,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: deployment-logs
-          path: |
-            **/deployment-*.log
-            **/error-*.log
+          name: deployment-logs-${{ needs.validate-prerequisites.outputs.environment }}
+          path: logs/
           retention-days: 7
       
       - name: Cleanup
