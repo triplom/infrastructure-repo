@@ -2,9 +2,9 @@
 set -e
 
 # First set the Variables as environment variables 
-# export GITHUB_USERNAME="your-username"
-# export GITHUB_TOKEN="your-token"
-# export GITHUB_EMAIL="your-email"
+export GITHUB_USERNAME="${GITHUB_USERNAME}"
+export GITHUB_TOKEN="${GITHUB_TOKEN}"
+export GITHUB_EMAIL="${GITHUB_EMAIL}"
 
 # Check if required environment variables are set
 if [ -z "$GITHUB_USERNAME" ] || [ -z "$GITHUB_TOKEN" ] || [ -z "$GITHUB_EMAIL" ]; then

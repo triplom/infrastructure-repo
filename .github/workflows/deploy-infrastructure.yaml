@@ -28,10 +28,64 @@ on:
           - ingress-nginx
 
 jobs:
+  validate-prerequisites:
+    name: Validate Prerequisites
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.set-env.outputs.environment }}
+      components: ${{ steps.set-components.outputs.components }}
+    steps:
+      - name: Set Environment
+        id: set-env
+        run: echo "environment=${{ github.event.inputs.environment || 'dev' }}" >> $GITHUB_OUTPUT
+      
+      - name: Set Components to Deploy
+        id: set-components
+        run: |
+          if [ "${{ github.event.inputs.component }}" = "all" ] || [ "${{ github.event.inputs.component }}" = "" ]; then
+            echo "components=cert-manager ingress-nginx" >> $GITHUB_OUTPUT
+          else
+            echo "components=${{ github.event.inputs.component }}" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      
+      - name: Validate Infrastructure Files
+        run: |
+          for component in ${{ steps.set-components.outputs.components }}; do
+            if [ ! -d "infrastructure/$component" ]; then
+              echo "::error::Component directory 'infrastructure/$component' not found"
+              exit 1
+            fi
+            
+            if [ ! -f "infrastructure/$component/base/deploy.sh" ]; then
+              echo "::error::Deployment script for '$component' not found at infrastructure/$component/base/deploy.sh"
+              exit 1
+            fi
+            
+            # Validate the script is executable
+            chmod +x "infrastructure/$component/base/deploy.sh"
+            
+            # Basic syntax check of shell script
+            bash -n "infrastructure/$component/base/deploy.sh" || {
+              echo "::error::Shell script syntax error in infrastructure/$component/base/deploy.sh"
+              exit 1
+            }
+          done
+      
+      - name: Validate Secret Existence
+        run: |
+          if [ -z "${{ secrets.KUBECONFIG }}" ]; then
+            echo "::error::KUBECONFIG secret is not set for environment ${{ steps.set-env.outputs.environment }}"
+            exit 1
+          fi
+
   deploy:
     name: Deploy Infrastructure
+    needs: validate-prerequisites
     runs-on: ubuntu-latest
-    environment: ${{ github.event.inputs.environment || 'dev' }}
+    environment: ${{ needs.validate-prerequisites.outputs.environment }}
     
     steps:
       - name: Checkout Repository
@@ -48,82 +102,92 @@ jobs:
       - name: Setup Helm
         uses: azure/setup-helm@v3
         with:
-          version: 'v3.13.3' # Updated to latest stable version
+          version: 'v3.13.3'
       
       - name: Setup Kubeconfig
+        id: kubeconfig
         run: |
+          # Write kubeconfig with proper permissions
           echo "${{ secrets.KUBECONFIG }}" | base64 -d > kubeconfig
-          echo "KUBECONFIG=./kubeconfig" >> $GITHUB_ENV
-          # Check if KUBECONFIG is valid
+          chmod 600 kubeconfig
+          echo "KUBECONFIG=$(pwd)/kubeconfig" >> $GITHUB_ENV
+          
+          # Verify kubeconfig content
+          if [ ! -s kubeconfig ]; then
+            echo "::error::Kubeconfig file is empty. Check your base64-encoded secret."
+            exit 1
+          fi
+          
+          # Validate kubeconfig works
           if ! kubectl config get-contexts > /dev/null 2>&1; then
-            echo "::error::Invalid KUBECONFIG file"
+            echo "::error::Invalid KUBECONFIG file format"
             exit 1
           fi
-          echo "Using Kubernetes context: $(kubectl config current-context)"
+          
+          if ! kubectl cluster-info > /dev/null 2>&1; then
+            echo "::error::Cannot connect to Kubernetes cluster. Cluster may be unreachable."
+            exit 1
+          fi
+          
+          CURRENT_CONTEXT=$(kubectl config current-context)
+          echo "Using Kubernetes context: $CURRENT_CONTEXT"
+          echo "current-context=$CURRENT_CONTEXT" >> $GITHUB_OUTPUT
       
-      - name: Deploy Cert Manager
-        if: ${{ github.event.inputs.component == 'cert-manager' || github.event.inputs.component == 'all' }}
+      - name: Deploy Components
+        env:
+          ENV: ${{ needs.validate-prerequisites.outputs.environment }}
+          KUBECTL_FLAGS: "--validate=false"
+          KUBECTL_CONTEXT: ${{ steps.kubeconfig.outputs.current-context }}
         run: |
-          ENV="${{ github.event.inputs.environment || 'dev' }}"
-          echo "Deploying Cert Manager to $ENV environment"
+          for component in ${{ needs.validate-prerequisites.outputs.components }}; do
+            echo "###################################################"
+            echo "# Deploying $component to $ENV environment"
+            echo "###################################################"
+            
+            component_dir="infrastructure/$component"
+            deploy_script="$component_dir/base/deploy.sh"
+            
+            # Set up environment variables for the script
+            export COMPONENT_ENV="$ENV"
+            
+            # Execute deployment with timeout and error handling
+            timeout 300s $deploy_script "$ENV" || {
+              EXIT_CODE=$?
+              if [ $EXIT_CODE -eq 124 ]; then
+                echo "::error::$component deployment timed out after 5 minutes"
+              else
+                echo "::error::$component deployment failed with exit code $EXIT_CODE"
+              fi
+              exit $EXIT_CODE
+            }
+            
+            echo "Verifying $component deployment..."
+            case "$component" in
+              cert-manager)
+                kubectl get deployment,pod -n cert-manager --selector=app.kubernetes.io/instance=cert-manager
+                kubectl wait --for=condition=available --timeout=60s deployment/cert-manager -n cert-manager || true
+                ;;
+              ingress-nginx)
+                kubectl get deployment,pod -n ingress-nginx --selector=app.kubernetes.io/instance=ingress-nginx
+                kubectl wait --for=condition=available --timeout=60s deployment/ingress-nginx-controller -n ingress-nginx || true
+                ;;
+            esac
+            
+            echo "$component deployment completed"
+            echo "---------------------------------------------------"
+          done
           
-          # Check if script exists
-          if [ ! -f "infrastructure/cert-manager/base/deploy.sh" ]; then
-            echo "::error::Cert Manager deployment script not found"
-            exit 1
-          fi
-          
-          chmod +x infrastructure/cert-manager/base/deploy.sh
-          
-          # Set KUBECTL_FLAGS to disable validation in CI environment
-          export KUBECTL_FLAGS="--validate=false"
-          
-          # Execute with timeout and capture exit code
-          timeout 300s ./infrastructure/cert-manager/base/deploy.sh "$ENV" || {
-            EXIT_CODE=$?
-            if [ $EXIT_CODE -eq 124 ]; then
-              echo "::error::Cert Manager deployment timed out"
-            else
-              echo "::error::Cert Manager deployment failed with exit code $EXIT_CODE"
-            fi
-            exit $EXIT_CODE
-          }
-          
-          # Verify deployment
-          echo "Verifying Cert Manager deployment..."
-          kubectl get deployment,pod -n cert-manager --selector=app.kubernetes.io/instance=cert-manager
+          echo "✅ All infrastructure components deployed successfully"
       
-      - name: Deploy Ingress Nginx
-        if: ${{ github.event.inputs.component == 'ingress-nginx' || github.event.inputs.component == 'all' }}
-        run: |
-          ENV="${{ github.event.inputs.environment || 'dev' }}"
-          echo "Deploying Ingress Nginx to $ENV environment"
-          
-          # Check if script exists
-          if [ ! -f "infrastructure/ingress-nginx/base/deploy.sh" ]; then
-            echo "::error::Ingress Nginx deployment script not found"
-            exit 1
-          fi
-          
-          chmod +x infrastructure/ingress-nginx/base/deploy.sh
-          
-          # Set KUBECTL_FLAGS to disable validation in CI environment
-          export KUBECTL_FLAGS="--validate=false"
-          
-          # Execute with timeout and capture exit code
-          timeout 300s ./infrastructure/ingress-nginx/base/deploy.sh "$ENV" || {
-            EXIT_CODE=$?
-            if [ $EXIT_CODE -eq 124 ]; then
-              echo "::error::Ingress Nginx deployment timed out"
-            else
-              echo "::error::Ingress Nginx deployment failed with exit code $EXIT_CODE"
-            fi
-            exit $EXIT_CODE
-          }
-          
-          # Verify deployment
-          echo "Verifying Ingress Nginx deployment..."
-          kubectl get deployment,pod -n ingress-nginx --selector=app.kubernetes.io/instance=ingress-nginx
+      - name: Upload Deployment Logs
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: deployment-logs
+          path: |
+            **/deployment-*.log
+            **/error-*.log
+          retention-days: 7
       
       - name: Cleanup
         if: always()
