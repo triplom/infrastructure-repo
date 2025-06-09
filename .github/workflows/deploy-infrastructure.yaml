@@ -75,10 +75,24 @@ jobs:
           done
       
       - name: Validate Secret Existence
+        env:
+          ENV: ${{ steps.set-env.outputs.environment }}
         run: |
-          if [ -z "${{ secrets.KUBECONFIG }}" ]; then
-            echo "::error::KUBECONFIG secret is not set for environment ${{ steps.set-env.outputs.environment }}"
+          # Dynamically check for the correct secret based on environment
+          SECRET_EXISTS="false"
+          if [ "$ENV" = "dev" ] && [ -n "${{ secrets.KUBECONFIG_DEV }}" ]; then
+            SECRET_EXISTS="true"
+          elif [ "$ENV" = "qa" ] && [ -n "${{ secrets.KUBECONFIG_QA }}" ]; then
+            SECRET_EXISTS="true"
+          elif [ "$ENV" = "prod" ] && [ -n "${{ secrets.KUBECONFIG_PROD }}" ]; then
+            SECRET_EXISTS="true"
+          fi
+          
+          if [ "$SECRET_EXISTS" != "true" ]; then
+            echo "::error::KUBECONFIG_${ENV^^} secret is not set for environment $ENV"
             exit 1
+          else
+            echo "KUBECONFIG_${ENV^^} secret confirmed for environment $ENV"
           fi
 
   deploy:
@@ -106,9 +120,27 @@ jobs:
       
       - name: Setup Kubeconfig
         id: kubeconfig
+        env:
+          ENV: ${{ needs.validate-prerequisites.outputs.environment }}
+          # Use environment-specific secrets
+          KUBECONFIG_DEV: ${{ secrets.KUBECONFIG_DEV }}
+          KUBECONFIG_QA: ${{ secrets.KUBECONFIG_QA }}
+          KUBECONFIG_PROD: ${{ secrets.KUBECONFIG_PROD }}
         run: |
+          # Select the appropriate KUBECONFIG based on environment
+          if [ "$ENV" = "dev" ]; then
+            KUBECONFIG_VALUE="$KUBECONFIG_DEV"
+          elif [ "$ENV" = "qa" ]; then
+            KUBECONFIG_VALUE="$KUBECONFIG_QA"
+          elif [ "$ENV" = "prod" ]; then
+            KUBECONFIG_VALUE="$KUBECONFIG_PROD"
+          else
+            echo "::error::Unknown environment: $ENV"
+            exit 1
+          fi
+          
           # Write kubeconfig with proper permissions
-          echo "${{ secrets.KUBECONFIG }}" | base64 -d > kubeconfig
+          echo "$KUBECONFIG_VALUE" | base64 -d > kubeconfig
           chmod 600 kubeconfig
           echo "KUBECONFIG=$(pwd)/kubeconfig" >> $GITHUB_ENV
           
