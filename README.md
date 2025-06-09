@@ -4,6 +4,9 @@
 
 A complete implementation of push-based GitOps using KIND (Kubernetes IN Docker) clusters with comprehensive monitoring through the kube-prometheus-stack.
 
+[![Deploy Infrastructure](https://github.com/triplom/infrastructure-repo/actions/workflows/deploy-infrastructure.yaml/badge.svg)](https://github.com/triplom/infrastructure-repo/actions/workflows/deploy-infrastructure.yaml)
+[![Deploy Applications](https://github.com/triplom/infrastructure-repo/actions/workflows/deploy-apps.yaml/badge.svg)](https://github.com/triplom/infrastructure-repo/actions/workflows/deploy-apps.yaml)
+
 ## 📋 Table of Contents
 
 - [Overview](#-overview)
@@ -11,6 +14,7 @@ A complete implementation of push-based GitOps using KIND (Kubernetes IN Docker)
 - [Prerequisites](#-prerequisites)
 - [Getting Started](#-getting-started)
   - [Setting Up KIND Clusters](#setting-up-kind-clusters)
+  - [Setting Up Self-Hosted Runners](#setting-up-self-hosted-runners)
   - [Local Registry Configuration](#local-registry-configuration)
   - [GitHub Repository Setup](#github-repository-setup)
 - [Repository Structure](#-repository-structure)
@@ -18,6 +22,7 @@ A complete implementation of push-based GitOps using KIND (Kubernetes IN Docker)
   - [Infrastructure Deployment](#infrastructure-deployment)
   - [Monitoring Stack Deployment](#monitoring-stack-deployment)
   - [Application Deployment](#application-deployment)
+  - [Cross-Repository Deployments](#cross-repository-deployments)
 - [CI/CD Pipeline](#-cicd-pipeline)
 - [Monitoring & Observability](#-monitoring--observability)
   - [Accessing Dashboards](#accessing-dashboards)
@@ -35,7 +40,8 @@ This repository implements a push-based GitOps approach using GitHub Actions to 
 **Key Features:**
 
 - Local KIND clusters for development, QA, and production environments
-- Push-based GitOps using GitHub Actions workflows
+- Push-based GitOps using GitHub Actions workflows with self-hosted runners
+- Cross-repository deployment integration for multi-repo architecture
 - Comprehensive monitoring with Prometheus, Grafana, and AlertManager
 - Multi-environment deployment strategy with proper separation of concerns
 - Ingress management with cert-manager for SSL/TLS
@@ -50,13 +56,15 @@ The architecture consists of three main components:
 1. **Source of Truth**: Git repository containing infrastructure and application configurations
 2. **CI/CD Pipeline**: GitHub Actions workflows that detect changes and apply them
 3. **Runtime**: KIND clusters running in Docker containers
+4. **Self-Hosted Runners**: For direct cluster access from GitHub Actions
 
 **Workflow:**
 
 1. Developer commits changes to the repository
 2. GitHub Actions detects changes and triggers appropriate workflows
-3. CI/CD pipeline applies changes to the appropriate environment
-4. Monitoring stack collects metrics and displays them in Grafana
+3. Self-hosted runners execute deployment workflows with direct access to local clusters
+4. CI/CD pipeline applies changes to the appropriate environment
+5. Monitoring stack collects metrics and displays them in Grafana
 
 ## 🧰 Prerequisites
 
@@ -67,6 +75,7 @@ The architecture consists of three main components:
 - [GitHub account](https://github.com/) with repository access
 - [yq](https://github.com/mikefarah/yq) for YAML processing
 - [GitHub CLI](https://cli.github.com/) (optional, for workflow triggering)
+- [ngrok](https://ngrok.com/) (optional, for exposing local clusters to external services)
 
 ## 🚀 Getting Started
 
@@ -95,6 +104,28 @@ This creates Kubernetes clusters based on your selection:
 - `qa-cluster`: For quality assurance and pre-production
 - `prod-cluster`: For production workloads
 
+### Setting Up Self-Hosted Runners
+
+For optimal cluster access, set up GitHub self-hosted runners on your local machine:
+
+```bash
+# Create a directory for the runner outside of your git repository
+mkdir -p ~/actions-runner && cd ~/actions-runner
+
+# Download the latest runner
+curl -o actions-runner-linux-x64-2.325.0.tar.gz -L https://github.com/actions/runner/releases/download/v2.325.0/actions-runner-linux-x64-2.325.0.tar.gz
+tar xzf ./actions-runner-linux-x64-2.325.0.tar.gz
+
+# Configure the runner (get your token from GitHub repository → Settings → Actions → Runners → New self-hosted runner)
+./config.sh --url https://github.com/your-username/infrastructure-repo --token YOUR_TOKEN
+
+# Install and start the runner as a service
+sudo ./svc.sh install
+sudo ./svc.sh start
+```
+
+> ⚠️ **Important**: Never commit the runner files to your Git repository. Add `actions-runner/` to your `.gitignore` file.
+
 ### GitHub Container Registry Setup
 
 Set up the GitHub Container Registry authentication:
@@ -104,7 +135,7 @@ chmod +x infrastructure/github-registry/github-setup.sh
 
 # Set GitHub credentials as environment variables
 export GITHUB_USERNAME="your-username"
-export GITHUB_TOKEN="your-personal-access-token"
+export GITHUB_PAT="your-personal-access-token" # Use environment variables instead of hardcoding
 export GITHUB_EMAIL="your-email@example.com"
 
 # Run the GitHub Container Registry setup
@@ -158,6 +189,7 @@ infrastructure-repo/
 │   ├── clusters/              # Cluster config files
 │   ├── setup-kind.sh          # Cluster creation script
 │   └── monitoring-stack.sh    # Monitoring deployment script
+├── logs/                      # Deployment logs (auto-generated)
 └── src/                       # Application source code
 ```
 
@@ -165,7 +197,7 @@ infrastructure-repo/
 
 ### Infrastructure Deployment
 
-Deploy core infrastructure components:
+Deploy core infrastructure components using self-hosted runners:
 
 ```bash
 # Manual trigger through GitHub UI
@@ -207,6 +239,30 @@ gh workflow run deploy-apps.yaml --ref main -F environment=dev
 gh workflow run deploy-apps.yaml --ref main -F environment=qa -F application=app1
 ```
 
+### Cross-Repository Deployments
+
+The enhanced workflow allows triggering deployments from external application repositories:
+
+```bash
+# From an external application repository
+curl -X POST \
+  -H "Authorization: token $GITHUB_PAT" \
+  -H "Accept: application/vnd.github.v3+json" \
+  https://api.github.com/repos/your-username/infrastructure-repo/dispatches \
+  -d '{
+    "event_type": "app-deployment-request",
+    "client_payload": {
+      "app_name": "my-application",
+      "version": "v1.2.3",
+      "repository": "your-username/app-repository",
+      "ref": "main",
+      "environment": "dev"
+    }
+  }'
+```
+
+This integration enables a true multi-repository architecture where each application can maintain its own code and deployment manifests while leveraging the centralized infrastructure deployment.
+
 ## 🔄 CI/CD Pipeline
 
 The CI/CD pipeline consists of several workflows:
@@ -218,11 +274,13 @@ The CI/CD pipeline consists of several workflows:
    - Updates application manifests with new image tags
 
 2. **Application Deployment (`deploy-apps.yaml`)**
-   - Deploys applications to Kubernetes clusters
-   - Can deploy specific applications or all applications
-   - Supports different environments (dev/qa/prod)
+   - Runs on self-hosted runners for direct cluster access
+   - Deploys applications to Kubernetes clusters using multiple deployment methods
+   - Supports cross-repository integration via repository_dispatch
+   - Enhanced logging and artifact collection
 
 3. **Infrastructure Deployment (`deploy-infrastructure.yaml`)**
+   - Runs on self-hosted runners for direct cluster access
    - Deploys core infrastructure components
    - Manages cert-manager and ingress-nginx
    - Support for multiple environments
@@ -308,8 +366,30 @@ This repository follows a multi-environment strategy:
 1. Check if the kubeconfig secrets are properly configured
 2. Verify the cluster is running with `kind get clusters`
 3. Check workflow logs in GitHub Actions
-4. Add `--validate=false` to kubectl commands in CI/CD environments
-5. Verify namespace exists before deploying resources
+4. Verify your self-hosted runner is active and connected
+5. Add `--validate=false` to kubectl commands in CI/CD environments
+6. Verify namespace exists before deploying resources
+
+#### Self-Hosted Runner Issues
+
+1. Check runner status: `sudo ./svc.sh status`
+2. Review runner logs: `cat ~/actions-runner/_diag/*.log`
+3. Ensure the runner has network access to both GitHub and your local Kubernetes clusters
+4. Verify the runner has installed the required tools (kubectl, kustomize, helm)
+
+#### Exposing Local Clusters with ngrok
+
+For external access or connecting CI/CD services to local clusters:
+
+```bash
+# Start ngrok to expose the Kubernetes API server
+ngrok http https://localhost:6443
+
+# Update your kubeconfig with the ngrok URL
+kubectl config set-cluster kind-dev-cluster --server=https://your-ngrok-url.ngrok.io
+
+# Create a GitHub secret with this updated kubeconfig
+```
 
 #### Image Pulling Issues
 
@@ -347,6 +427,11 @@ This repository follows a multi-environment strategy:
    - Expose services only when necessary
    - Configure proper TLS with cert-manager
 
+5. **Token Management**:
+   - Never hardcode tokens in scripts or workflows
+   - Use environment variables for sensitive values
+   - Implement pre-commit hooks to prevent accidental credential commits
+
 ## 👨‍💻 Contributing
 
 Contributions are welcome! Please follow these steps:
@@ -368,6 +453,14 @@ For local development, you can use the provided scripts:
 # Install pre-commit hooks for validation
 pip install pre-commit
 pre-commit install
+
+# Add security scanning to prevent token commits
+cat >> .pre-commit-config.yaml << EOF
+- repo: https://github.com/zricethezav/gitleaks
+  rev: v8.18.1
+  hooks:
+  - id: gitleaks
+EOF
 ```
 
 Check the [CONTRIBUTING](docs/CONTRIBUTING.md) file for details
@@ -376,6 +469,4 @@ Check the [CONTRIBUTING](docs/CONTRIBUTING.md) file for details
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
----
-
-**Note**: This documentation assumes you're using the repository locally or in a private GitHub repository. For production use, consider additional security measures and proper CI/CD pipelines with appropriate approvals.
+---.
