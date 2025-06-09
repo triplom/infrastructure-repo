@@ -2,7 +2,7 @@
 # Run this locally to generate a proper ngrok kubeconfig
 
 # Your current ngrok URL
-NGROK_URL="https://9342-87-103-115-149.ngrok-free.app"
+NGROK_URL="https://ecc4-87-103-115-149.ngrok-free.app"
 
 # Create a simple test kubeconfig for ngrok
 cat > ngrok-kubeconfig << EOF
