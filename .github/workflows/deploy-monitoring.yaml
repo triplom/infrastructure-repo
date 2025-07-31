@@ -21,7 +21,8 @@ on:
 jobs:
   deploy:
     name: Deploy Monitoring
-    runs-on: ubuntu-latest
+    # For KIND clusters, use self-hosted runner. For cloud clusters, use ubuntu-latest
+    runs-on: self-hosted
     environment: ${{ github.event.inputs.environment || 'dev' }}
     
     steps:
@@ -38,32 +39,73 @@ jobs:
       
       - name: Setup yq
         run: |
-          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
-          sudo chmod +x /usr/local/bin/yq
+          if ! command -v yq &> /dev/null; then
+            sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+            sudo chmod +x /usr/local/bin/yq
+          fi
           yq --version
       
       - name: Setup Kubeconfig
+        id: kubeconfig
         run: |
-          echo "${{ secrets.KUBECONFIG }}" | base64 -d > kubeconfig
-          echo "KUBECONFIG=./kubeconfig" >> $GITHUB_ENV
-          # Verify kubeconfig is valid
-          kubectl config get-contexts || {
-            echo "::error::Invalid kubeconfig file"
-            exit 1
-          }
+          ENV="${{ github.event.inputs.environment || 'dev' }}"
+          
+          # Check if we're running on self-hosted runner with direct KIND access
+          if kind get clusters | grep -q "${ENV}-cluster"; then
+            echo "Using direct KIND cluster access"
+            kind get kubeconfig --name "${ENV}-cluster" > kubeconfig
+          else
+            # Use the provided kubeconfig from secrets
+            echo "${{ secrets.KUBECONFIG }}" | base64 -d > kubeconfig_b64
+            
+            # Check if the file is not empty and looks like a kubeconfig
+            if [ -s kubeconfig_b64 ] && grep -q "apiVersion: v1" kubeconfig_b64; then
+              mv kubeconfig_b64 kubeconfig
+            else
+              echo "::error::Invalid kubeconfig from secrets"
+              exit 1
+            fi
+          fi
+          
+          chmod 600 kubeconfig
+          echo "KUBECONFIG=$(pwd)/kubeconfig" >> $GITHUB_ENV
+          
+          # Show available contexts without sensitive info
+          kubectl --kubeconfig=$(pwd)/kubeconfig config get-contexts
+          
+          # Set the context explicitly based on environment
+          kubectl --kubeconfig=$(pwd)/kubeconfig config use-context kind-${ENV}-cluster || true
       
       - name: Check Kubernetes connectivity
         run: |
-          kubectl cluster-info --request-timeout=30s || echo "Cannot connect directly to API server, will use --validate=false"
+          # Print the current context and server URL (redact sensitive parts)
+          kubectl --kubeconfig=$KUBECONFIG config view --minify | grep -E 'context|server' | sed 's|https://[^:]*:[0-9]*|https://REDACTED:PORT|g'
+          
+          # Check connectivity with more detailed error output
+          if ! kubectl --kubeconfig=$KUBECONFIG cluster-info --request-timeout=30s; then
+            echo "::warning::Cannot connect directly to API server"
+            
+            # Check if port-forwarding might be needed for local clusters
+            if [[ "$KUBECONFIG" == *"127.0.0.1"* || "$KUBECONFIG" == *"localhost"* ]]; then
+              echo "::error::Local cluster detected. For GitHub-hosted runners, you need to expose your cluster API externally"
+              echo "Consider using ngrok or similar tools, or switch to a self-hosted runner"
+            fi
+            
+            # Continue with --validate=false for all future kubectl commands
+            echo "VALIDATE_FLAG=--validate=false" >> $GITHUB_ENV
+          else
+            echo "VALIDATE_FLAG=" >> $GITHUB_ENV
+          fi
       
       - name: Add Helm repositories
         run: |
-          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-          helm repo update
+          helm --kubeconfig=$KUBECONFIG repo add prometheus-community https://prometheus-community.github.io/helm-charts
+          helm --kubeconfig=$KUBECONFIG repo update
       
       - name: Create namespace
         run: |
-          kubectl apply --validate=false -f infrastructure/monitoring/base/namespace.yaml || {
+          echo "Creating monitoring namespace with VALIDATE_FLAG=$VALIDATE_FLAG"
+          kubectl --kubeconfig=$KUBECONFIG apply $VALIDATE_FLAG -f infrastructure/monitoring/base/namespace.yaml || {
             echo "::error::Failed to create namespace"
             exit 1
           }
@@ -88,7 +130,7 @@ jobs:
           fi
           
           # Deploy using Helm with atomic to ensure rollback on failure
-          if ! helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+          if ! helm --kubeconfig=$KUBECONFIG upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
             --namespace monitoring \
             --values values-$ENV.yaml \
             --atomic \
@@ -98,7 +140,7 @@ jobs:
           fi
           
           # Apply additional Prometheus rules with validation disabled
-          if ! kubectl apply --validate=false -f infrastructure/monitoring/base/prometheus-rules.yaml; then
+          if ! kubectl --kubeconfig=$KUBECONFIG apply $VALIDATE_FLAG -f infrastructure/monitoring/base/prometheus-rules.yaml; then
             echo "::warning::Failed to apply prometheus rules, but continuing"
           fi
       
@@ -108,32 +150,32 @@ jobs:
           echo "Verifying monitoring deployments..."
           
           # Check Prometheus
-          if ! kubectl -n monitoring wait --for=condition=available --timeout=300s deployment/kube-prometheus-stack-prometheus 2>/dev/null; then
+          if ! kubectl --kubeconfig=$KUBECONFIG -n monitoring wait --for=condition=available --timeout=300s deployment/kube-prometheus-stack-prometheus 2>/dev/null; then
             echo "::warning::Prometheus deployment not found or not ready"
-            kubectl -n monitoring get deployments -l "app=prometheus"
+            kubectl --kubeconfig=$KUBECONFIG -n monitoring get deployments -l "app=prometheus"
           else
             echo "✅ Prometheus is ready"
           fi
           
           # Check Grafana
-          if ! kubectl -n monitoring wait --for=condition=available --timeout=300s deployment/kube-prometheus-stack-grafana 2>/dev/null; then
+          if ! kubectl --kubeconfig=$KUBECONFIG -n monitoring wait --for=condition=available --timeout=300s deployment/kube-prometheus-stack-grafana 2>/dev/null; then
             echo "::warning::Grafana deployment not found or not ready"
-            kubectl -n monitoring get deployments -l "app=grafana"
+            kubectl --kubeconfig=$KUBECONFIG -n monitoring get deployments -l "app=grafana"
           else
             echo "✅ Grafana is ready"
           fi
           
           # Check AlertManager
-          if ! kubectl -n monitoring wait --for=condition=available --timeout=300s deployment/kube-prometheus-stack-alertmanager 2>/dev/null; then
+          if ! kubectl --kubeconfig=$KUBECONFIG -n monitoring wait --for=condition=available --timeout=300s deployment/kube-prometheus-stack-alertmanager 2>/dev/null; then
             echo "::warning::AlertManager deployment not found or not ready"
-            kubectl -n monitoring get deployments -l "app=alertmanager"
+            kubectl --kubeconfig=$KUBECONFIG -n monitoring get deployments -l "app=alertmanager"
           else
             echo "✅ AlertManager is ready"
           fi
           
           # List all monitoring resources
           echo "Deployed monitoring resources:"
-          kubectl -n monitoring get all -l "release=kube-prometheus-stack"
+          kubectl --kubeconfig=$KUBECONFIG -n monitoring get all -l "release=kube-prometheus-stack"
       
       - name: Get access information
         if: success()
@@ -144,7 +186,7 @@ jobs:
           echo "kubectl port-forward -n monitoring svc/kube-prometheus-stack-grafana 3000:80"
           echo ""
           echo "For direct pod access, use:"
-          POD_NAME=$(kubectl --namespace monitoring get pod -l "app.kubernetes.io/name=grafana,app.kubernetes.io/instance=kube-prometheus-stack" -oname 2>/dev/null || echo "pod/grafana-not-found")
+          POD_NAME=$(kubectl --kubeconfig=$KUBECONFIG --namespace monitoring get pod -l "app.kubernetes.io/name=grafana,app.kubernetes.io/instance=kube-prometheus-stack" -oname 2>/dev/null || echo "pod/grafana-not-found")
           echo "kubectl --namespace monitoring port-forward $POD_NAME 3000"
           echo ""
           echo "Prometheus can be accessed via port-forwarding:"
