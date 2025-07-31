@@ -124,9 +124,22 @@ tar xzf ./actions-runner-linux-x64-2.325.0.tar.gz
 # Configure the runner (get your token from GitHub repository → Settings → Actions → Runners → New self-hosted runner)
 ./config.sh --url https://github.com/your-username/infrastructure-repo --token YOUR_TOKEN
 
-# Install and start the runner as a service
-sudo ./runsvc.sh install
-sudo ./runsvc.sh start
+# Last step, run it!
+$ ./run.sh
+
+## To get the token, you would:
+
+## Go to your GitHub repository
+## Navigate to Settings → Actions → Runners
+## Click "New self-hosted runner"
+## You'll see the setup instructions including the token value to use
+
+```
+
+```bash
+Using your self-hosted runner
+# Use this YAML in your workflow file for each job
+runs-on: self-hosted
 ```
 
 > ⚠️ **Important**: Never commit the runner files to your Git repository. Add `actions-runner/` to your `.gitignore` file.
