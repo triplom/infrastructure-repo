@@ -81,6 +81,9 @@ jobs:
     env:
       ENV: ${{ needs.validate.outputs.environment }}
       APP: ${{ needs.validate.outputs.application }}
+      GITHUB_USERNAME: ${{ secrets.GITHUB_USERNAME }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GITHUB_EMAIL: ${{ secrets.GITHUB_EMAIL }}
     
     steps:
       - name: Checkout Repository
@@ -247,6 +250,16 @@ jobs:
               # Create namespace
               kubectl create namespace $app-$env --dry-run=client -o yaml | kubectl apply --validate=false -f - 2> >(tee -a "$error_log" >&2) | tee -a "$deploy_log"
               
+              # Create GitHub Container Registry Secret
+              echo "Creating GitHub Container Registry Secret" | tee -a "$deploy_log"
+              kubectl create secret docker-registry github-registry-secret \
+                --namespace=$app-$env \
+                --docker-server=ghcr.io \
+                --docker-username=$GITHUB_USERNAME \
+                --docker-password=$GITHUB_TOKEN \
+                --docker-email=$GITHUB_EMAIL \
+                --dry-run=client -o yaml | kubectl apply --validate=false -f - 2> >(tee -a "$error_log" >&2) | tee -a "$deploy_log"
+              
               # Determine chart path
               local chart_path="apps/$app"
               if [ -d "apps/$app/chart" ]; then
@@ -277,6 +290,17 @@ jobs:
               # Create namespace if it doesn't exist
               kubectl create namespace $app-$env --dry-run=client -o yaml | kubectl apply --validate=false -f - 2> >(tee -a "$error_log" >&2) | tee -a "$deploy_log"
               
+              # Create GitHub Container Registry Secret BEFORE applying kustomize
+              # This fixes the error where Kustomize tries to reference a secret that doesn't exist
+              echo "Creating GitHub Container Registry Secret" | tee -a "$deploy_log"
+              kubectl create secret docker-registry github-registry-secret \
+                --namespace=$app-$env \
+                --docker-server=ghcr.io \
+                --docker-username=$GITHUB_USERNAME \
+                --docker-password=$GITHUB_TOKEN \
+                --docker-email=$GITHUB_EMAIL \
+                --dry-run=client -o yaml | kubectl apply --validate=false -f - 2> >(tee -a "$error_log" >&2) | tee -a "$deploy_log"
+              
               # Apply Kustomize overlay
               kubectl apply --validate=false -k "apps/$app/overlays/$env" 2> >(tee -a "$error_log" >&2) | tee -a "$deploy_log"
               if [ ${PIPESTATUS[0]} -ne 0 ]; then
@@ -295,6 +319,16 @@ jobs:
               
               # Create namespace
               kubectl create namespace $app-$env --dry-run=client -o yaml | kubectl apply --validate=false -f - 2> >(tee -a "$error_log" >&2) | tee -a "$deploy_log"
+              
+              # Create GitHub Container Registry Secret
+              echo "Creating GitHub Container Registry Secret" | tee -a "$deploy_log"
+              kubectl create secret docker-registry github-registry-secret \
+                --namespace=$app-$env \
+                --docker-server=ghcr.io \
+                --docker-username=$GITHUB_USERNAME \
+                --docker-password=$GITHUB_TOKEN \
+                --docker-email=$GITHUB_EMAIL \
+                --dry-run=client -o yaml | kubectl apply --validate=false -f - 2> >(tee -a "$error_log" >&2) | tee -a "$deploy_log"
               
               # Apply all yaml files
               kubectl apply --validate=false -f "$manifest_dir" 2> >(tee -a "$error_log" >&2) | tee -a "$deploy_log"
