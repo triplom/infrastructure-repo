@@ -81,9 +81,6 @@ jobs:
     env:
       ENV: ${{ needs.validate.outputs.environment }}
       APP: ${{ needs.validate.outputs.application }}
-      GITHUB_USERNAME: ${{ secrets.GITHUB_USERNAME }}
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      GITHUB_EMAIL: ${{ secrets.GITHUB_EMAIL }}
     
     steps:
       - name: Checkout Repository
@@ -111,47 +108,95 @@ jobs:
           version: 'v3.13.3'
       
       - name: Setup Kubeconfig
+        id: kubeconfig
+        env:
+          ENV: ${{ needs.validate.outputs.environment }}
+          # Use environment-specific secrets
+          KUBECONFIG_DEV: ${{ secrets.KUBECONFIG_DEV }}
+          KUBECONFIG_QA: ${{ secrets.KUBECONFIG_QA }}
+          KUBECONFIG_PROD: ${{ secrets.KUBECONFIG_PROD }}
         run: |
-          # Create logs directory
-          mkdir -p logs
-          
-          # Create temporary kubeconfig file
-          TEMP_KUBECONFIG=$(mktemp)
-          
-          # Get the appropriate kubeconfig based on environment
+          # Select the appropriate KUBECONFIG based on environment
           if [ "$ENV" = "dev" ]; then
-            echo "${{ secrets.KUBECONFIG_DEV }}" | base64 -d > "${TEMP_KUBECONFIG}"
+            KUBECONFIG_VALUE="$KUBECONFIG_DEV"
           elif [ "$ENV" = "qa" ]; then
-            echo "${{ secrets.KUBECONFIG_QA }}" | base64 -d > "${TEMP_KUBECONFIG}"
+            KUBECONFIG_VALUE="$KUBECONFIG_QA"
           elif [ "$ENV" = "prod" ]; then
-            echo "${{ secrets.KUBECONFIG_PROD }}" | base64 -d > "${TEMP_KUBECONFIG}"
+            KUBECONFIG_VALUE="$KUBECONFIG_PROD"
           else
             echo "::error::Unknown environment: $ENV"
             exit 1
           fi
           
-          chmod 600 "${TEMP_KUBECONFIG}"
-          echo "KUBECONFIG=${TEMP_KUBECONFIG}" >> $GITHUB_ENV
+          # Create a temporary file with the secret content
+          echo "$KUBECONFIG_VALUE" > encoded_config.txt
           
-          # Verify kubeconfig
-          echo "Verifying Kubernetes configuration..."
-          if ! kubectl config get-contexts > logs/kubeconfig-contexts.txt 2>&1; then
-            echo "::error::Failed to get kubectl contexts. Check KUBECONFIG_${ENV} secret."
-            cat logs/kubeconfig-contexts.txt
+          # Check if content needs to be decoded or is already in proper format
+          if grep -q "apiVersion: v1" encoded_config.txt; then
+            echo "Content appears to be in raw YAML format, using as-is"
+            cp encoded_config.txt kubeconfig
+          else
+            echo "Attempting to decode base64 content"
+            # Try different decode options with error handling
+            if ! base64 -d encoded_config.txt > kubeconfig 2>/dev/null; then
+              if ! base64 --decode encoded_config.txt > kubeconfig 2>/dev/null; then
+                # If both fail, try a different approach - some systems might have different flags
+                cat encoded_config.txt | tr -d '[:space:]' > clean_encoded_config.txt
+                if ! base64 -d clean_encoded_config.txt > kubeconfig 2>/dev/null; then
+                  if ! base64 --decode clean_encoded_config.txt > kubeconfig 2>/dev/null; then
+                    echo "::error::Failed to decode base64 content with standard options"
+                    echo "Content format check (first 20 chars):"
+                    head -c 20 encoded_config.txt | xxd -p
+                    exit 1
+                  fi
+                fi
+              fi
+            fi
+          fi
+          
+          # Clean up temporary files
+          rm -f encoded_config.txt clean_encoded_config.txt 2>/dev/null || true
+          
+          # Set proper permissions
+          chmod 600 kubeconfig
+          
+          # Verify kubeconfig content
+          if [ ! -s kubeconfig ]; then
+            echo "::error::Kubeconfig file is empty after processing"
             exit 1
           fi
           
-          # Show which context we're using
+          # Check if it looks like a valid kubeconfig
+          if ! grep -q "apiVersion: v1" kubeconfig; then
+            echo "::error::File doesn't appear to be a valid kubeconfig (missing 'apiVersion: v1')"
+            echo "First 5 lines of file (sanitized):"
+            head -n 5 kubeconfig | sed 's/\(password\|token\|client-key-data\|certificate\|auth-provider\): .*/\1: [REDACTED]/g'
+            exit 1
+          fi
+          
+          echo "KUBECONFIG=$(pwd)/kubeconfig" >> $GITHUB_ENV
+          
+          # Display basic information (without showing secrets)
+          echo "Examining kubeconfig structure:"
+          kubectl config view --minify | grep -v -E "certificate|token"
+          
+          # The rest of your validation steps...
+          echo "Available contexts:"
+          kubectl config get-contexts
+          
+          if ! kubectl config get-contexts > /dev/null 2>&1; then
+            echo "::error::Invalid KUBECONFIG file format"
+            exit 1
+          fi
+          
+          if ! kubectl cluster-info > /dev/null 2>&1; then
+            echo "::error::Cannot connect to Kubernetes cluster. Cluster may be unreachable."
+            exit 1
+          fi
+          
           CURRENT_CONTEXT=$(kubectl config current-context)
           echo "Using Kubernetes context: $CURRENT_CONTEXT"
-          echo "cluster-context=$CURRENT_CONTEXT" >> logs/deployment-info.txt
-          
-          # Test API server connectivity
-          echo "Testing API server connectivity..."
-          if ! kubectl cluster-info > logs/cluster-info.txt 2>&1; then
-            echo "::warning::Cannot connect to Kubernetes API server directly. Using --validate=false flag."
-            cat logs/cluster-info.txt
-          fi
+          echo "current-context=$CURRENT_CONTEXT" >> $GITHUB_OUTPUT
 
       - name: Prepare External App (if applicable)
         if: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.repository != '' }}
@@ -202,6 +247,26 @@ jobs:
           # Create log directory for deployment logs
           mkdir -p logs
           
+          # Function to copy GitHub registry secret from container-auth namespace
+          copy_registry_secret() {
+            local namespace=$1
+            local deploy_log=$2
+            local error_log=$3
+            
+            echo "Copying GitHub Container Registry Secret from container-auth namespace to $namespace" | tee -a "$deploy_log"
+            # Check if the secret exists in container-auth namespace
+            if kubectl get secret github-registry-secret --namespace=container-auth &>/dev/null; then
+              # Copy and modify the secret to the app's namespace
+              kubectl get secret github-registry-secret --namespace=container-auth -o yaml | \
+                sed "s/namespace: container-auth/namespace: $namespace/" | \
+                kubectl apply --validate=false -f - 2> >(tee -a "$error_log" >&2) | tee -a "$deploy_log"
+              return 0
+            else
+              echo "::warning::Secret github-registry-secret not found in container-auth namespace" | tee -a "$deploy_log"
+              return 1
+            fi
+          }
+          
           # Function to deploy a single app
           deploy_app() {
             local app=$1
@@ -250,15 +315,8 @@ jobs:
               # Create namespace
               kubectl create namespace $app-$env --dry-run=client -o yaml | kubectl apply --validate=false -f - 2> >(tee -a "$error_log" >&2) | tee -a "$deploy_log"
               
-              # Create GitHub Container Registry Secret
-              echo "Creating GitHub Container Registry Secret" | tee -a "$deploy_log"
-              kubectl create secret docker-registry github-registry-secret \
-                --namespace=$app-$env \
-                --docker-server=ghcr.io \
-                --docker-username=$GITHUB_USERNAME \
-                --docker-password=$GITHUB_TOKEN \
-                --docker-email=$GITHUB_EMAIL \
-                --dry-run=client -o yaml | kubectl apply --validate=false -f - 2> >(tee -a "$error_log" >&2) | tee -a "$deploy_log"
+              # Copy GitHub registry secret from container-auth namespace
+              copy_registry_secret "$app-$env" "$deploy_log" "$error_log"
               
               # Determine chart path
               local chart_path="apps/$app"
@@ -290,16 +348,8 @@ jobs:
               # Create namespace if it doesn't exist
               kubectl create namespace $app-$env --dry-run=client -o yaml | kubectl apply --validate=false -f - 2> >(tee -a "$error_log" >&2) | tee -a "$deploy_log"
               
-              # Create GitHub Container Registry Secret BEFORE applying kustomize
-              # This fixes the error where Kustomize tries to reference a secret that doesn't exist
-              echo "Creating GitHub Container Registry Secret" | tee -a "$deploy_log"
-              kubectl create secret docker-registry github-registry-secret \
-                --namespace=$app-$env \
-                --docker-server=ghcr.io \
-                --docker-username=$GITHUB_USERNAME \
-                --docker-password=$GITHUB_TOKEN \
-                --docker-email=$GITHUB_EMAIL \
-                --dry-run=client -o yaml | kubectl apply --validate=false -f - 2> >(tee -a "$error_log" >&2) | tee -a "$deploy_log"
+              # Copy GitHub registry secret from container-auth namespace
+              copy_registry_secret "$app-$env" "$deploy_log" "$error_log"
               
               # Apply Kustomize overlay
               kubectl apply --validate=false -k "apps/$app/overlays/$env" 2> >(tee -a "$error_log" >&2) | tee -a "$deploy_log"
@@ -320,15 +370,8 @@ jobs:
               # Create namespace
               kubectl create namespace $app-$env --dry-run=client -o yaml | kubectl apply --validate=false -f - 2> >(tee -a "$error_log" >&2) | tee -a "$deploy_log"
               
-              # Create GitHub Container Registry Secret
-              echo "Creating GitHub Container Registry Secret" | tee -a "$deploy_log"
-              kubectl create secret docker-registry github-registry-secret \
-                --namespace=$app-$env \
-                --docker-server=ghcr.io \
-                --docker-username=$GITHUB_USERNAME \
-                --docker-password=$GITHUB_TOKEN \
-                --docker-email=$GITHUB_EMAIL \
-                --dry-run=client -o yaml | kubectl apply --validate=false -f - 2> >(tee -a "$error_log" >&2) | tee -a "$deploy_log"
+              # Copy GitHub registry secret from container-auth namespace
+              copy_registry_secret "$app-$env" "$deploy_log" "$error_log"
               
               # Apply all yaml files
               kubectl apply --validate=false -f "$manifest_dir" 2> >(tee -a "$error_log" >&2) | tee -a "$deploy_log"
