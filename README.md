@@ -15,7 +15,7 @@ A complete implementation of push-based GitOps using KIND (Kubernetes IN Docker)
 - [Getting Started](#-getting-started)
   - [Setting Up KIND Clusters](#setting-up-kind-clusters)
   - [Setting Up Self-Hosted Runners](#setting-up-self-hosted-runners)
-  - [Local Registry Configuration](#local-registry-configuration)
+  - [GitHub Container Registry Setup](#github-container-registry-setup)
   - [GitHub Repository Setup](#github-repository-setup)
 - [Repository Structure](#-repository-structure)
 - [Deployment Workflows](#-deployment-workflows)
@@ -113,15 +113,20 @@ For optimal cluster access, set up GitHub self-hosted runners on your local mach
 mkdir -p ~/actions-runner && cd ~/actions-runner
 
 # Download the latest runner
-curl -o actions-runner-linux-x64-2.325.0.tar.gz -L https://github.com/actions/runner/releases/download/v2.325.0/actions-runner-linux-x64-2.325.0.tar.gz
+# Fetch the latest version dynamically
+LATEST_VERSION=$(curl -s https://api.github.com/repos/actions/runner/releases/latest | jq -r '.tag_name')
+curl -o actions-runner-linux-x64-${LATEST_VERSION}.tar.gz -L https://github.com/actions/runner/releases/download/${LATEST_VERSION}/actions-runner-linux-x64-${LATEST_VERSION}.tar.gz
+
+# Alternatively, ensure to check for the latest version manually:
+# Visit https://github.com/actions/runner/releases to find the latest version.
 tar xzf ./actions-runner-linux-x64-2.325.0.tar.gz
 
 # Configure the runner (get your token from GitHub repository → Settings → Actions → Runners → New self-hosted runner)
 ./config.sh --url https://github.com/your-username/infrastructure-repo --token YOUR_TOKEN
 
 # Install and start the runner as a service
-sudo ./svc.sh install
-sudo ./svc.sh start
+sudo ./runsvc.sh install
+sudo ./runsvc.sh start
 ```
 
 > ⚠️ **Important**: Never commit the runner files to your Git repository. Add `actions-runner/` to your `.gitignore` file.
