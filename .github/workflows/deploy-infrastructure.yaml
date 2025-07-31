@@ -157,26 +157,62 @@ jobs:
             exit 1
           fi
           
-          # Write kubeconfig with proper permissions
-          echo "$KUBECONFIG_VALUE" | base64 -d > kubeconfig
+          # Create a temporary file with the secret content
+          echo "$KUBECONFIG_VALUE" > encoded_config.txt
+          
+          # Check if content needs to be decoded or is already in proper format
+          if grep -q "apiVersion: v1" encoded_config.txt; then
+            echo "Content appears to be in raw YAML format, using as-is"
+            cp encoded_config.txt kubeconfig
+          else
+            echo "Attempting to decode base64 content"
+            # Try different decode options with error handling
+            if ! base64 -d encoded_config.txt > kubeconfig 2>/dev/null; then
+              if ! base64 --decode encoded_config.txt > kubeconfig 2>/dev/null; then
+                # If both fail, try a different approach - some systems might have different flags
+                cat encoded_config.txt | tr -d '[:space:]' > clean_encoded_config.txt
+                if ! base64 -d clean_encoded_config.txt > kubeconfig 2>/dev/null; then
+                  if ! base64 --decode clean_encoded_config.txt > kubeconfig 2>/dev/null; then
+                    echo "::error::Failed to decode base64 content with standard options"
+                    echo "Content format check (first 20 chars):"
+                    head -c 20 encoded_config.txt | xxd -p
+                    exit 1
+                  fi
+                fi
+              fi
+            fi
+          fi
+          
+          # Clean up temporary files
+          rm -f encoded_config.txt clean_encoded_config.txt 2>/dev/null || true
+          
+          # Set proper permissions
           chmod 600 kubeconfig
-          echo "KUBECONFIG=$(pwd)/kubeconfig" >> $GITHUB_ENV
           
           # Verify kubeconfig content
           if [ ! -s kubeconfig ]; then
-            echo "::error::Kubeconfig file is empty. Check your base64-encoded secret."
+            echo "::error::Kubeconfig file is empty after processing"
             exit 1
           fi
+          
+          # Check if it looks like a valid kubeconfig
+          if ! grep -q "apiVersion: v1" kubeconfig; then
+            echo "::error::File doesn't appear to be a valid kubeconfig (missing 'apiVersion: v1')"
+            echo "First 5 lines of file (sanitized):"
+            head -n 5 kubeconfig | sed 's/\(password\|token\|client-key-data\|certificate\|auth-provider\): .*/\1: [REDACTED]/g'
+            exit 1
+          fi
+          
+          echo "KUBECONFIG=$(pwd)/kubeconfig" >> $GITHUB_ENV
           
           # Display basic information (without showing secrets)
           echo "Examining kubeconfig structure:"
           kubectl config view --minify | grep -v -E "certificate|token"
           
-          # Show available contexts
+          # The rest of your validation steps...
           echo "Available contexts:"
           kubectl config get-contexts
           
-          # Validate kubeconfig works
           if ! kubectl config get-contexts > /dev/null 2>&1; then
             echo "::error::Invalid KUBECONFIG file format"
             exit 1
