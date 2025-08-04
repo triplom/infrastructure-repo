@@ -259,7 +259,15 @@ jobs:
               # Copy and modify the secret to the app's namespace
               kubectl get secret github-registry-secret --namespace=container-auth -o yaml | \
                 sed "s/namespace: container-auth/namespace: $namespace/" | \
+                sed '/creationTimestamp:/d' | \
+                sed '/resourceVersion:/d' | \
+                sed '/uid:/d' | \
                 kubectl apply --validate=false -f - 2> >(tee -a "$error_log" >&2) | tee -a "$deploy_log"
+              
+              # Important: Wait for the secret to be available in the API server
+              echo "Waiting for secret to be available in the API server..." | tee -a "$deploy_log"
+              kubectl wait --for=condition=Available --timeout=30s secret/github-registry-secret -n $namespace 2>/dev/null || true
+              
               return 0
             else
               echo "::warning::Secret github-registry-secret not found in container-auth namespace" | tee -a "$deploy_log"
