@@ -7,10 +7,17 @@ resources:
 namespace: app1-dev
 
 patches:
-- path: patches.yaml
-  target:
+- target:
     kind: Deployment
     name: app1
+  patch: |-
+    - op: ensure
+      path: /spec/template/spec/imagePullSecrets
+      value: []
+    - op: add
+      path: /spec/template/spec/imagePullSecrets/-
+      value:
+        name: github-registry-secret
 
 configMapGenerator:
 - name: app1-config
