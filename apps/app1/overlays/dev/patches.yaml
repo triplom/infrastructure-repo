@@ -4,6 +4,9 @@ metadata:
   name: app1
 spec:
   replicas: 1
+  selector:
+    matchLabels:
+      app: app1
   template:
     spec:
       containers:
@@ -20,4 +23,3 @@ spec:
           requests:
             memory: "64Mi"
             cpu: "100m"
-            
