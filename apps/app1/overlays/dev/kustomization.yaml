@@ -11,13 +11,10 @@ patches:
     kind: Deployment
     name: app1
   patch: |-
-    - op: ensure
+    - op: replace
       path: /spec/template/spec/imagePullSecrets
-      value: []
-    - op: add
-      path: /spec/template/spec/imagePullSecrets/-
       value:
-        name: github-registry-secret
+      - name: github-registry-secret
 
 configMapGenerator:
 - name: app1-config
@@ -26,7 +23,7 @@ configMapGenerator:
   - ENVIRONMENT=dev
   - LOG_LEVEL=DEBUG
 
-# # Add this section to pull the GitHub Container Registry secret
+# REMOVED: This is causing the conflict because the secret is already being created in the pipeline
 # secretGenerator:
 # - name: github-registry-secret
 #   namespace: app1-dev
