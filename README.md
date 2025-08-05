@@ -2,10 +2,11 @@
 
 <img src="gitops.png" alt="gitops" width="100" align="center"/> 
 
-A complete implementation of push-based GitOps using KIND (Kubernetes IN Docker) clusters with comprehensive monitoring through the kube-prometheus-stack.
+A complete implementation of push-based GitOps using KIND (Kubernetes IN Docker) clusters with comprehensive monitoring, multi-application support, and cross-repository deployment capabilities.
 
 [![Deploy Infrastructure](https://github.com/triplom/infrastructure-repo/actions/workflows/deploy-infrastructure.yaml/badge.svg)](https://github.com/triplom/infrastructure-repo/actions/workflows/deploy-infrastructure.yaml)
 [![Deploy Applications](https://github.com/triplom/infrastructure-repo/actions/workflows/deploy-apps.yaml/badge.svg)](https://github.com/triplom/infrastructure-repo/actions/workflows/deploy-apps.yaml)
+[![CI Pipeline](https://github.com/triplom/infrastructure-repo/actions/workflows/ci-pipeline.yaml/badge.svg)](https://github.com/triplom/infrastructure-repo/actions/workflows/ci-pipeline.yaml)
 
 ## 📋 Table of Contents
 
@@ -24,6 +25,9 @@ A complete implementation of push-based GitOps using KIND (Kubernetes IN Docker)
   - [Application Deployment](#application-deployment)
   - [Cross-Repository Deployments](#cross-repository-deployments)
 - [CI/CD Pipeline](#-cicd-pipeline)
+  - [Multi-Application Support](#multi-application-support)
+  - [Environment Promotion](#environment-promotion)
+  - [Automated Testing](#automated-testing)
 - [Monitoring & Observability](#-monitoring--observability)
   - [Accessing Dashboards](#accessing-dashboards)
   - [Metrics & Alerts](#metrics--alerts)
@@ -35,36 +39,52 @@ A complete implementation of push-based GitOps using KIND (Kubernetes IN Docker)
 
 ## 🌐 Overview
 
-This repository implements a push-based GitOps approach using GitHub Actions to deploy infrastructure and applications to Kubernetes clusters. Unlike pull-based GitOps solutions (like ArgoCD or Flux), this approach triggers deployments through CI/CD pipelines when changes are detected in the Git repository.
+This repository implements a comprehensive push-based GitOps approach using GitHub Actions to deploy infrastructure and applications to Kubernetes clusters. Unlike pull-based GitOps solutions (like ArgoCD or Flux), this approach triggers deployments through CI/CD pipelines when changes are detected in the Git repository.
 
 **Key Features:**
 
-- Local KIND clusters for development, QA, and production environments
-- Push-based GitOps using GitHub Actions workflows with self-hosted runners
-- Cross-repository deployment integration for multi-repo architecture
-- Comprehensive monitoring with Prometheus, Grafana, and AlertManager
-- Multi-environment deployment strategy with proper separation of concerns
-- Ingress management with cert-manager for SSL/TLS
-- GitHub Container Registry for storing container images
+- **Multi-Environment Support**: Local KIND clusters for development, QA, and production environments
+- **Push-Based GitOps**: GitHub Actions workflows with self-hosted runners for direct cluster access
+- **Multi-Application Architecture**: Support for app1, app2, and k8s-web-app-php with independent deployment
+- **Cross-Repository Integration**: Deploy applications from external repositories to centralized infrastructure
+- **Environment Promotion**: Automated promotion flow (dev → qa → prod) with image tag management
+- **Comprehensive Monitoring**: Prometheus, Grafana, and AlertManager with pre-configured dashboards
+- **Advanced CI/CD**: Matrix builds, change detection, and component-specific deployments
+- **Security**: GitHub Container Registry integration with proper secret management
 
 ## 🏛️ Architecture
 
 ![Architecture Diagram](KIND_CICD_flow.png)
 
-The architecture consists of three main components:
+The architecture consists of multiple components working together:
 
-1. **Source of Truth**: Git repository containing infrastructure and application configurations
-2. **CI/CD Pipeline**: GitHub Actions workflows that detect changes and apply them
-3. **Runtime**: KIND clusters running in Docker containers
-4. **Self-Hosted Runners**: For direct cluster access from GitHub Actions
+### **Infrastructure Layer**
 
-**Workflow:**
+- **KIND Clusters**: `kind-dev-cluster`, `kind-qa-cluster`, `kind-prod-cluster`
+- **Container Registry**: GitHub Container Registry (ghcr.io)
+- **Self-Hosted Runners**: Direct cluster access for deployments
 
-1. Developer commits changes to the repository
-2. GitHub Actions detects changes and triggers appropriate workflows
-3. Self-hosted runners execute deployment workflows with direct access to local clusters
-4. CI/CD pipeline applies changes to the appropriate environment
-5. Monitoring stack collects metrics and displays them in Grafana
+### **Application Layer**
+
+- **app1**: Python-based application with pytest testing
+- **app2**: Multi-language application (Python/Node.js support)
+- **k8s-web-app-php**: Symfony/Sylius e-commerce platform with dual containers (PHP-FPM + Nginx)
+
+### **CI/CD Pipeline**
+
+- **Change Detection**: Automatic detection of modified applications
+- **Matrix Builds**: Parallel building of changed applications
+- **Environment Promotion**: Controlled promotion between environments
+- **Cross-Repository**: External app deployment via repository dispatch
+
+**Deployment Flow:**
+
+1. Developer commits changes to application repository
+2. CI pipeline detects changes and builds affected applications
+3. Docker images are pushed to GitHub Container Registry
+4. Deployment workflow applies changes to appropriate environment
+5. Monitoring stack tracks deployment status and application health
+6. Promotion workflow manages image promotion between environments
 
 ## 🧰 Prerequisites
 
@@ -72,19 +92,20 @@ The architecture consists of three main components:
 - [kubectl](https://kubernetes.io/docs/tasks/tools/) (v1.24+)
 - [kind](https://kind.sigs.k8s.io/docs/user/quick-start/#installation) (v0.20+)
 - [Helm](https://helm.sh/docs/intro/install/) (v3.12+)
+- [Kustomize](https://kustomize.io/) (v4.5+)
 - [GitHub account](https://github.com/) with repository access
 - [yq](https://github.com/mikefarah/yq) for YAML processing
 - [GitHub CLI](https://cli.github.com/) (optional, for workflow triggering)
-- [ngrok](https://ngrok.com/) (optional, for exposing local clusters to external services)
+- [jq](https://stedolan.jq.io/) for JSON processing
 
 ## 🚀 Getting Started
 
 ### Setting Up KIND Clusters
 
-Clone the repository and run the KIND setup script:
+Clone the repository and create the KIND clusters:
 
 ```bash
-git clone https://github.com/your-username/infrastructure-repo.git
+git clone https://github.com/triplom/infrastructure-repo.git
 cd infrastructure-repo
 chmod +x kind/setup-kind.sh
 
@@ -98,48 +119,35 @@ chmod +x kind/setup-kind.sh
 ./kind/setup-kind.sh --force
 ```
 
-This creates Kubernetes clusters based on your selection:
+This creates three Kubernetes clusters:
 
-- `dev-cluster`: For development and testing
-- `qa-cluster`: For quality assurance and pre-production
-- `prod-cluster`: For production workloads
+- `kind-dev-cluster`: Development environment
+- `kind-qa-cluster`: Quality assurance environment  
+- `kind-prod-cluster`: Production environment
 
 ### Setting Up Self-Hosted Runners
 
-For optimal cluster access, set up GitHub self-hosted runners on your local machine:
+For optimal cluster access, set up GitHub self-hosted runners:
 
 ```bash
 # Create a directory for the runner outside of your git repository
 mkdir -p ~/actions-runner && cd ~/actions-runner
 
 # Download the latest runner
-# Fetch the latest version dynamically
 LATEST_VERSION=$(curl -s https://api.github.com/repos/actions/runner/releases/latest | jq -r '.tag_name')
 curl -o actions-runner-linux-x64-${LATEST_VERSION}.tar.gz -L https://github.com/actions/runner/releases/download/${LATEST_VERSION}/actions-runner-linux-x64-${LATEST_VERSION}.tar.gz
 
-# Alternatively, ensure to check for the latest version manually:
-# Visit https://github.com/actions/runner/releases to find the latest version.
-tar xzf ./actions-runner-linux-x64-2.325.0.tar.gz
+tar xzf ./actions-runner-linux-x64-*.tar.gz
 
-# Configure the runner (get your token from GitHub repository → Settings → Actions → Runners → New self-hosted runner)
-./config.sh --url https://github.com/your-username/infrastructure-repo --token YOUR_TOKEN
+# Configure the runner (get your token from GitHub repository → Settings → Actions → Runners)
+./config.sh --url https://github.com/triplom/infrastructure-repo --token YOUR_TOKEN
 
-# Last step, run it!
-$ ./run.sh
+# Run the runner
+./run.sh
 
-## To get the token, you would:
-
-## Go to your GitHub repository
-## Navigate to Settings → Actions → Runners
-## Click "New self-hosted runner"
-## You'll see the setup instructions including the token value to use
-
-```
-
-```bash
-Using your self-hosted runner
-# Use this YAML in your workflow file for each job
-runs-on: self-hosted
+# Optional: Install as a service
+sudo ./svc.sh install
+sudo ./svc.sh start
 ```
 
 > ⚠️ **Important**: Never commit the runner files to your Git repository. Add `actions-runner/` to your `.gitignore` file.
@@ -152,8 +160,8 @@ Set up the GitHub Container Registry authentication:
 chmod +x infrastructure/github-registry/github-setup.sh
 
 # Set GitHub credentials as environment variables
-export GITHUB_USERNAME="your-username"
-export GITHUB_PAT="your-personal-access-token" # Use environment variables instead of hardcoding
+export GITHUB_USERNAME="triplom"
+export GITHUB_PAT="your-personal-access-token"
 export GITHUB_EMAIL="your-email@example.com"
 
 # Run the GitHub Container Registry setup
@@ -165,326 +173,635 @@ kubectl get secrets -n container-auth
 
 ### GitHub Repository Setup
 
-1. Push the repository to GitHub
-2. Configure GitHub Secrets for cluster access
-   - Go to your GitHub repository → Settings → Secrets and Variables → Actions
-   - Add the following secrets:
-     - `KUBECONFIG_DEV`: Base64-encoded kubeconfig for dev cluster
-     - `KUBECONFIG_QA`: Base64-encoded kubeconfig for QA cluster
-     - `KUBECONFIG_PROD`: Base64-encoded kubeconfig for production cluster
+1. **Configure Repository Secrets**:
 
-   To encode your kubeconfig files:
+   > Go to your GitHub repository → Settings → Secrets and Variables → Actions and add:
 
-```bash
-# Linux
-base64 -w 0 dev-cluster-kubeconfig > dev-cluster-kubeconfig-base64.txt
+   ```bash
+   # Cluster access secrets
+   KUBECONFIG_DEV: Base64-encoded kubeconfig for dev cluster
+   KUBECONFIG_QA: Base64-encoded kubeconfig for QA cluster  
+   KUBECONFIG_PROD: Base64-encoded kubeconfig for production cluster
+   
+   # Cross-repository deployment token
+   INFRA_REPO_PAT: Personal Access Token with repo and workflow permissions
+   ```
 
-# macOS
-base64 -i dev-cluster-kubeconfig -o dev-cluster-kubeconfig-base64.txt
+2. **Encode kubeconfig files**:
 
-# Copy the contents of dev-cluster-kubeconfig-base64.txt to the KUBECONFIG_DEV secret
-```
+   ```bash
+   # Get kubeconfig for each cluster
+   kind get kubeconfig --name dev-cluster > dev-cluster-kubeconfig
+   kind get kubeconfig --name qa-cluster > qa-cluster-kubeconfig
+   kind get kubeconfig --name prod-cluster > prod-cluster-kubeconfig
+   
+   # Encode for GitHub secrets
+   base64 -w 0 dev-cluster-kubeconfig > dev-cluster-kubeconfig-base64.txt
+   base64 -w 0 qa-cluster-kubeconfig > qa-cluster-kubeconfig-base64.txt
+   base64 -w 0 prod-cluster-kubeconfig > prod-cluster-kubeconfig-base64.txt
+   ```
 
 ## 📂 Repository Structure
 
 ```bash
 infrastructure-repo/
-├── .github/workflows/         # GitHub Actions workflow definitions
-│   ├── ci-pipeline.yaml       # Build and test applications
-│   ├── deploy-apps.yaml       # Deploy applications to clusters
-│   ├── deploy-infrastructure.yaml # Deploy core infrastructure
-│   └── deploy-monitoring.yaml # Deploy monitoring stack
-├── apps/                      # Application manifests
-│   └── app1/                  # Sample application
-│       ├── base/              # Base manifests
-│       └── overlays/          # Environment-specific overlays
-├── infrastructure/            # Infrastructure components
-│   ├── cert-manager/          # TLS certificate management
-│   ├── ingress-nginx/         # Ingress controller
-│   ├── monitoring/            # Prometheus & Grafana stack
-│   └── github-registry/       # GitHub Container Registry setup
-├── kind/                      # KIND cluster configurations
-│   ├── clusters/              # Cluster config files
-│   ├── setup-kind.sh          # Cluster creation script
-│   └── monitoring-stack.sh    # Monitoring deployment script
-├── logs/                      # Deployment logs (auto-generated)
-└── src/                       # Application source code
+├── .github/workflows/              # GitHub Actions workflow definitions
+│   ├── ci-pipeline.yaml           # Multi-app CI/CD with promotion
+│   ├── deploy-apps.yaml           # Enhanced app deployment with external repo support
+│   ├── deploy-infrastructure.yaml # Core infrastructure deployment
+│   └── deploy-monitoring.yaml     # Monitoring stack deployment
+├── apps/                          # Application manifests
+│   ├── app1/                      # Python application
+│   │   ├── base/                  # Base Kubernetes manifests
+│   │   └── overlays/              # Environment-specific overlays
+│   │       ├── dev/
+│   │       ├── qa/
+│   │       └── prod/
+│   ├── app2/                      # Multi-language application
+│   │   ├── base/                  # Base Kubernetes manifests
+│   │   └── overlays/              # Environment-specific overlays
+│   │       ├── dev/
+│   │       ├── qa/
+│   │       └── prod/
+│   └── k8s-web-app-php/          # Symfony/Sylius e-commerce app
+│       ├── base/
+│       │   ├── deployment.yaml    # Dual container deployment
+│       │   ├── service.yaml
+│       │   └── kustomization.yaml
+│       └── overlays/
+├── infrastructure/                # Infrastructure components
+│   ├── cert-manager/             # TLS certificate management
+│   ├── ingress-nginx/            # Ingress controller
+│   ├── monitoring/               # Prometheus & Grafana stack
+│   └── github-registry/          # GitHub Container Registry setup
+├── kind/                         # KIND cluster configurations
+│   ├── clusters/                 # Cluster config files
+│   │   ├── dev-cluster.yaml
+│   │   ├── qa-cluster.yaml
+│   │   └── prod-cluster.yaml
+│   ├── setup-kind.sh            # Cluster creation script
+│   └── monitoring-stack.sh      # Monitoring deployment script
+└── logs/                        # Deployment logs (auto-generated)
 ```
 
 ## 🔄 Deployment Workflows
 
 ### Infrastructure Deployment
 
-Deploy core infrastructure components using self-hosted runners:
+Deploy core infrastructure components:
 
 ```bash
 # Manual trigger through GitHub UI
 # Go to Actions → Deploy Infrastructure → Run workflow
 
-# Or from command line (requires GitHub CLI)
-gh workflow run deploy-infrastructure.yaml --ref main -F environment=dev -F component=all
+# Or using GitHub CLI
+gh workflow run deploy-infrastructure.yaml \
+  --ref main \
+  -F environment=dev \
+  -F component=all
 
 # Deploy specific components
-gh workflow run deploy-infrastructure.yaml --ref main -F environment=dev -F component=cert-manager
-gh workflow run deploy-infrastructure.yaml --ref main -F environment=dev -F component=ingress-nginx
+gh workflow run deploy-infrastructure.yaml \
+  --ref main \
+  -F environment=dev \
+  -F component=cert-manager
 ```
 
 ### Monitoring Stack Deployment
 
-Deploy the Prometheus monitoring stack:
+Deploy the comprehensive monitoring stack:
 
 ```bash
-# Manual trigger
-gh workflow run deploy-monitoring.yaml --ref main -F environment=dev
+# Deploy monitoring to dev environment
+gh workflow run deploy-monitoring.yaml \
+  --ref main \
+  -F environment=dev
 ```
 
 This deploys:
 
-- Prometheus for metrics collection
-- Grafana for visualization
-- AlertManager for alerts
-- Node Exporter and Kube State Metrics for enhanced monitoring
+- **Prometheus**: Metrics collection and storage
+- **Grafana**: Visualization and dashboards
+- **AlertManager**: Alert routing and management
+- **Node Exporter**: Host metrics collection
+- **Kube State Metrics**: Kubernetes object metrics
 
 ### Application Deployment
 
-Deploy sample applications:
+Deploy applications with enhanced capabilities:
 
 ```bash
-# Deploy all applications to dev
-gh workflow run deploy-apps.yaml --ref main -F environment=dev
+# Deploy all applications to dev (automatic on main push)
+gh workflow run deploy-apps.yaml \
+  --ref main \
+  -F environment=dev
 
-# Deploy a specific application to qa
-gh workflow run deploy-apps.yaml --ref main -F environment=qa -F application=app1
+# Deploy specific application to qa
+gh workflow run deploy-apps.yaml \
+  --ref main \
+  -F environment=qa \
+  -F application=k8s-web-app-php
 ```
 
 ### Cross-Repository Deployments
 
-The enhanced workflow allows triggering deployments from external application repositories:
+The enhanced workflow supports deployment from external application repositories:
+
+**From k8s-web-app-php repository:**
 
 ```bash
-# From an external application repository
+# Automatic deployment on push to main
+git push origin main
+
+# Manual deployment to specific environment
+gh workflow run trigger-deployment.yml \
+  --ref main \
+  -F environment=qa \
+  -F version=v1.2.3
+```
+
+**Repository dispatch integration:**
+
+```bash
 curl -X POST \
   -H "Authorization: token $GITHUB_PAT" \
   -H "Accept: application/vnd.github.v3+json" \
-  https://api.github.com/repos/your-username/infrastructure-repo/dispatches \
+  https://api.github.com/repos/triplom/infrastructure-repo/dispatches \
   -d '{
     "event_type": "app-deployment-request",
     "client_payload": {
-      "app_name": "my-application",
-      "version": "v1.2.3",
-      "repository": "your-username/app-repository",
-      "ref": "main",
-      "environment": "dev"
+      "app_name": "k8s-web-app-php",
+      "repository": "triplom/k8s-web-app-php",
+      "version": "abc123def456",
+      "environment": "dev",
+      "triggered_by": "developer"
     }
   }'
 ```
 
-This integration enables a true multi-repository architecture where each application can maintain its own code and deployment manifests while leveraging the centralized infrastructure deployment.
-
 ## 🔄 CI/CD Pipeline
 
-The CI/CD pipeline consists of several workflows:
+### Multi-Application Support
 
-1. **CI Pipeline (`ci-pipeline.yaml`)**
-   - Triggered on pushes to `main` and feature branches
-   - Runs tests on application code
-   - Builds Docker images and pushes to registry
-   - Updates application manifests with new image tags
+The CI/CD pipeline supports multiple applications with intelligent change detection:
 
-2. **Application Deployment (`deploy-apps.yaml`)**
-   - Runs on self-hosted runners for direct cluster access
-   - Deploys applications to Kubernetes clusters using multiple deployment methods
-   - Supports cross-repository integration via repository_dispatch
-   - Enhanced logging and artifact collection
+```yaml
+# Applications supported:
+- app1: Python application with pytest
+- app2: Multi-language (Python/Node.js)  
+- k8s-web-app-php: Symfony/Sylius with dual containers
+```
 
-3. **Infrastructure Deployment (`deploy-infrastructure.yaml`)**
-   - Runs on self-hosted runners for direct cluster access
-   - Deploys core infrastructure components
-   - Manages cert-manager and ingress-nginx
-   - Support for multiple environments
+**Features:**
 
-4. **Monitoring Stack Deployment (`deploy-monitoring.yaml`)**
-   - Deploys Prometheus, Grafana, and AlertManager
-   - Configures dashboards and alerting rules
-   - Environment-specific configurations
+- **Change Detection**: Only builds applications that have changed
+- **Matrix Builds**: Parallel building of multiple applications
+- **Component Filtering**: Deploy specific applications or all at once
+- **Cross-Repository**: External applications can trigger deployments
+
+### Environment Promotion
+
+Automated promotion flow between environments:
+
+```bash
+# Promotion Flow: dev → qa → prod
+
+# Promote from dev to qa
+gh workflow run ci-pipeline.yaml \
+  --ref main \
+  -F environment=qa \
+  -F component=all \
+  -F action=promote
+
+# Promote from qa to prod  
+gh workflow run ci-pipeline.yaml \
+  --ref main \
+  -F environment=prod \
+  -F component=k8s-web-app-php \
+  -F action=promote
+```
+
+**Promotion Process:**
+
+1. Extracts image tags from source environment
+2. Updates target environment with promoted tags
+3. Commits changes to infrastructure repository
+4. Triggers deployment to target environment
+5. Validates deployment success
+
+### Automated Testing
+
+Comprehensive testing for each application type:
+
+**app1 (Python):**
+
+```bash
+pip install -r requirements.txt
+pip install pytest pytest-cov
+pytest --cov=./ --cov-report=xml
+```
+
+**app2 (Multi-language):**
+
+```bash
+# Python support
+pip install -r requirements.txt && pytest
+
+# Node.js support  
+npm install && npm test
+```
+
+**k8s-web-app-php (Symfony/Sylius):**
+
+```bash
+composer install --no-dev --optimize-autoloader
+vendor/bin/phpunit  # or bin/phpunit
+```
 
 ## 📊 Monitoring & Observability
 
 ### Accessing Dashboards
 
-After deployment, access the dashboards using port-forwarding:
+After deployment, access monitoring dashboards:
 
 #### Grafana
 
 ```bash
-# Using the service
-kubectl --context kind-dev-cluster -n monitoring port-forward svc/kube-prometheus-stack-grafana 3000:80
-
-# Direct pod access (if service access fails)
-export POD_NAME=$(kubectl --namespace monitoring get pod -l "app.kubernetes.io/name=grafana,app.kubernetes.io/instance=kube-prometheus-stack" -oname)
-kubectl --namespace monitoring port-forward $POD_NAME 3000
+kubectl --context kind-dev-cluster -n monitoring \
+  port-forward svc/kube-prometheus-stack-grafana 3000:80
 ```
 
-Then visit <http://localhost:3000> in your browser (default credentials: admin/gitops-admin)
+Visit: [http://localhost:3000](http://localhost:3000) (admin/gitops-admin)
 
 #### Prometheus
 
 ```bash
-kubectl --context kind-dev-cluster -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:9090
+kubectl --context kind-dev-cluster -n monitoring \
+  port-forward svc/kube-prometheus-stack-prometheus 9090:9090
 ```
 
-Then visit <http://localhost:9090> in your browser
+Visit: [http://localhost:9090](http://localhost:9090)
 
 #### AlertManager
 
 ```bash
-kubectl --context kind-dev-cluster -n monitoring port-forward svc/kube-prometheus-stack-alertmanager 9093:9093
+kubectl --context kind-dev-cluster -n monitoring \
+  port-forward svc/kube-prometheus-stack-alertmanager 9093:9093
 ```
 
-Then visit <http://localhost:9093> in your browser
+Visit: [http://localhost:9093](http://localhost:9093)
 
 ### Metrics & Alerts
 
-The monitoring stack includes:
+**Pre-configured Dashboards:**
 
-- **System metrics**: CPU, memory, disk, network usage
-- **Kubernetes metrics**: Pod status, deployment status
-- **Application metrics**: Custom metrics exposed by applications
-- **Pre-configured alerts**: High CPU/memory usage, pod crashes, etc.
+- Kubernetes cluster overview
+- Node and pod resource usage
+- Application-specific metrics
+- Deployment and rollout status
+- Network and storage metrics
+
+**Alert Rules:**
+
+- High CPU/memory usage
+- Pod crash loops
+- Deployment failures
+- Persistent volume issues
+- Node unavailability
 
 ## 🌍 Multi-Environment Strategy
 
-This repository follows a multi-environment strategy:
+### Environment Configuration
 
-1. **Development** (`dev`):
-   - Fast deployments
-   - Minimal resources
-   - Debug-level logging
-   - Automatic deployments on main branch changes
+| Environment | Cluster | Purpose | Deployment Trigger |
+|-------------|---------|---------|-------------------|
+| **dev** | `kind-dev-cluster` | Development & testing | Automatic on main push |
+| **qa** | `kind-qa-cluster` | Quality assurance | Manual or promotion |
+| **prod** | `kind-prod-cluster` | Production workloads | Manual promotion only |
 
-2. **QA/Testing** (`qa`):
-   - More resources for testing
-   - More replicas for resilience testing
-   - Integration tests
-   - Manual approval for deployments
+### Resource Allocation
 
-3. **Production** (`prod`):
-   - Maximum resources
-   - Multiple replicas
-   - Production-level logging
-   - Stricter security settings
-   - Required approvals for deployments
+**Development:**
+
+- Minimal replicas (1)
+- Lower resource limits
+- Debug logging enabled
+- Fast deployment cycles
+
+**QA:**
+
+- Moderate replicas (2)
+- Production-like resources
+- Integration testing
+- Staging data
+
+**Production:**
+
+- High availability (3+ replicas)
+- Maximum resource allocation
+- Production logging
+- Real user data
 
 ## 🔍 Troubleshooting
 
 ### Common Issues
 
-#### Workflow Failure
+#### Workflow Failures
 
-1. Check if the kubeconfig secrets are properly configured
-2. Verify the cluster is running with `kind get clusters`
-3. Check workflow logs in GitHub Actions
-4. Verify your self-hosted runner is active and connected
-5. Add `--validate=false` to kubectl commands in CI/CD environments
-6. Verify namespace exists before deploying resources
+**Issue**: Repository dispatch fails with "Resource not accessible"
+
+```bash
+# Solution: Check token permissions
+# Ensure INFRA_REPO_PAT has 'repo' and 'workflow' scopes
+
+# Debug token availability
+if [ -z "${{ secrets.INFRA_REPO_PAT }}" ]; then
+  echo "Token not available"
+fi
+```
+
+**Issue**: Kustomize patch errors
+
+```bash
+# Error: no matches for Id Deployment.v1.apps/app-name
+# Solution: Verify deployment names match between base and patches
+
+# Check deployment name in base
+grep -A 5 "kind: Deployment" apps/app/base/deployment.yaml
+
+# Check patch target
+grep -A 5 "kind: Deployment" apps/app/overlays/env/patches.yaml
+```
+
+#### Cross-Repository Deployment Issues
+
+**Issue**: External app not found in apps directory
+
+```bash
+# Solution: Ensure "Prepare External App" step copies files correctly
+# Check if k8s directory exists in external repo
+ls -la external-app/k8s/
+
+# Verify kustomization files are copied
+find apps/app-name -name "kustomization.yaml"
+```
+
+**Issue**: Image version not updating
+
+```bash
+# Solution: Check image tag replacement in temporary directory
+# Verify kustomize edit commands succeed
+kustomize edit set image "app=ghcr.io/user/app:version"
+```
 
 #### Self-Hosted Runner Issues
 
-1. Check runner status: `sudo ./svc.sh status`
-2. Review runner logs: `cat ~/actions-runner/_diag/*.log`
-3. Ensure the runner has network access to both GitHub and your local Kubernetes clusters
-4. Verify the runner has installed the required tools (kubectl, kustomize, helm)
-
-#### Exposing Local Clusters with ngrok
-
-For external access or connecting CI/CD services to local clusters:
+**Issue**: Runner not connecting to clusters
 
 ```bash
-# Start ngrok to expose the Kubernetes API server
-ngrok http https://localhost:6443
+# Check runner status
+sudo ./svc.sh status
 
-# Update your kubeconfig with the ngrok URL
-kubectl config set-cluster kind-dev-cluster --server=https://your-ngrok-url.ngrok.io
+# Verify cluster access
+kubectl --context kind-dev-cluster get nodes
 
-# Create a GitHub secret with this updated kubeconfig
+# Check runner logs
+cat ~/actions-runner/_diag/*.log
 ```
 
-#### Image Pulling Issues
+**Issue**: Missing tools on runner
 
-1. Ensure the local registry is running: `docker ps | grep registry`
-2. Check if the image exists: `docker images | grep app1`
-3. Verify registry connectivity from clusters: `curl -X GET http://localhost:5000/v2/_catalog`
-4. Check if container runtime is configured correctly: `docker exec <node-name> cat /etc/containerd/certs.d/localhost:5000/hosts.toml`
+```bash
+# Install required tools
+sudo apt-get update
+sudo apt-get install -y kubectl
 
-#### Monitoring Stack Issues
+# Install kustomize
+curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+sudo mv kustomize /usr/local/bin/
 
-1. Verify the Helm release: `helm list -n monitoring`
-2. Check Prometheus pods: `kubectl -n monitoring get pods | grep prometheus`
-3. Check Grafana logs: `kubectl -n monitoring logs deploy/kube-prometheus-stack-grafana -c grafana`
-4. Verify ConfigMaps are properly created: `kubectl -n monitoring get cm`
+# Install helm
+curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+```
+
+#### Application-Specific Issues
+
+**k8s-web-app-php Issues:**
+
+```bash
+# Check dual container deployment
+kubectl get pods -n k8s-web-app-php-dev
+kubectl describe pod <pod-name> -n k8s-web-app-php-dev
+
+# Verify image pull secrets
+kubectl get secrets -n k8s-web-app-php-dev
+
+# Check container logs
+kubectl logs <pod-name> -c php-fpm -n k8s-web-app-php-dev
+kubectl logs <pod-name> -c nginx -n k8s-web-app-php-dev
+```
+
+### Debug Commands
+
+```bash
+# Check workflow status
+gh run list --workflow=ci-pipeline.yaml
+
+# View workflow logs
+gh run view <run-id> --log
+
+# Check cluster status
+kubectl get nodes --context kind-dev-cluster
+kubectl get pods --all-namespaces --context kind-dev-cluster
+
+# Verify image registry
+curl -X GET http://localhost:5000/v2/_catalog
+```
 
 ## 🔒 Security Best Practices
 
-1. **Secure Secrets Management**:
-   - Never commit kubeconfig files or credentials to the repository
-   - Use GitHub Secrets for sensitive information
-   - Consider tools like Sealed Secrets for Kubernetes secrets
+### Secret Management
 
-2. **Access Control**:
-   - Use least privilege principle for CI/CD workflows
-   - Set appropriate environment protections in GitHub
-   - Implement proper approvals for production deployments
+1. **GitHub Secrets**:
 
-3. **Container Security**:
-   - Scan images for vulnerabilities
-   - Use minimal base images
-   - Don't run containers as root
+   ```bash
+   # Never commit sensitive data
+   echo "*.kubeconfig" >> .gitignore
+   echo "*.pem" >> .gitignore
+   echo ".env" >> .gitignore
+   
+   # Use environment variables in scripts
+   export GITHUB_PAT="${GITHUB_PAT}"
+   export KUBECONFIG="${KUBECONFIG}"
+   ```
 
-4. **Network Security**:
-   - Use network policies to restrict traffic
-   - Expose services only when necessary
-   - Configure proper TLS with cert-manager
+2. **Token Rotation**:
 
-5. **Token Management**:
-   - Never hardcode tokens in scripts or workflows
-   - Use environment variables for sensitive values
-   - Implement pre-commit hooks to prevent accidental credential commits
+   ```bash
+   # Regularly rotate Personal Access Tokens
+   # Use GitHub Apps for better security
+   # Implement token expiration policies
+   ```
 
-## 👨‍💻 Contributing
+### Container Security
 
-Contributions are welcome! Please follow these steps:
+1. **Image Scanning**:
 
-1. Fork the repository
-2. Create a feature branch: `git checkout -b feature/my-new-feature`
-3. Make your changes and commit: `git commit -am 'Add some feature'`
-4. Push to the branch: `git push origin feature/my-new-feature`
-5. Submit a pull request
+   ```yaml
+   # Add to CI pipeline
+   - name: Scan Docker image
+     uses: aquasecurity/trivy-action@master
+     with:
+       image-ref: 'ghcr.io/triplom/app:${{ github.sha }}'
+       format: 'sarif'
+       output: 'trivy-results.sarif'
+   ```
 
-For local development, you can use the provided scripts:
+2. **Security Policies**:
+
+   ```yaml
+   # Pod Security Standards
+   apiVersion: v1
+   kind: Namespace
+   metadata:
+     labels:
+       pod-security.kubernetes.io/enforce: restricted
+       pod-security.kubernetes.io/audit: restricted
+       pod-security.kubernetes.io/warn: restricted
+   ```
+
+### Access Control
+
+1. **RBAC Configuration**:
+
+   ```yaml
+   # Least privilege principle
+   apiVersion: rbac.authorization.k8s.io/v1
+   kind: Role
+   metadata:
+     name: app-deployer
+   rules:
+   - apiGroups: ["apps"]
+     resources: ["deployments"]
+     verbs: ["get", "list", "create", "update", "patch"]
+   ```
+
+2. **Environment Protection**:
+
+   ```bash
+   # GitHub Environment Protection Rules
+   # - Required reviewers for production
+   # - Deployment branches restriction
+   # - Environment secrets isolation
+   ```
+
+### Pre-commit Security
 
 ```bash
-# Setup development environment
-./kind/setup-kind.sh dev
-./infrastructure/local-registry/setup-registry.sh
+# Install security scanning
+pip install pre-commit detect-secrets
 
-# Validate code
-# Install pre-commit hooks for validation
-pip install pre-commit
-pre-commit install
-
-# Add security scanning to prevent token commits
-cat >> .pre-commit-config.yaml << EOF
+# Configure pre-commit hooks
+cat > .pre-commit-config.yaml << EOF
+repos:
+- repo: https://github.com/Yelp/detect-secrets
+  rev: v1.4.0
+  hooks:
+  - id: detect-secrets
+    args: ['--baseline', '.secrets.baseline']
 - repo: https://github.com/zricethezav/gitleaks
   rev: v8.18.1
   hooks:
   - id: gitleaks
 EOF
+
+# Initialize and install
+pre-commit install
+detect-secrets scan --baseline .secrets.baseline
 ```
 
-Check the [CONTRIBUTING](docs/CONTRIBUTING.md) file for details
+## 👨‍💻 Contributing
+
+We welcome contributions! Please follow these guidelines:
+
+### Development Setup
+
+```bash
+# Fork and clone the repository
+git clone https://github.com/your-username/infrastructure-repo.git
+cd infrastructure-repo
+
+# Create development environment
+./kind/setup-kind.sh dev
+./infrastructure/github-registry/github-setup.sh
+
+# Install development tools
+pip install pre-commit detect-secrets
+pre-commit install
+
+# Create feature branch
+git checkout -b feature/your-feature-name
+```
+
+### Testing Changes
+
+```bash
+# Test infrastructure deployment
+gh workflow run deploy-infrastructure.yaml -F environment=dev -F component=all
+
+# Test application deployment  
+gh workflow run deploy-apps.yaml -F environment=dev -F application=app1
+
+# Test cross-repository integration
+curl -X POST -H "Authorization: token $GITHUB_PAT" \
+  https://api.github.com/repos/triplom/infrastructure-repo/dispatches \
+  -d '{"event_type":"app-deployment-request","client_payload":{"app_name":"test"}}'
+```
+
+### Submission Process
+
+1. **Create Pull Request**:
+   - Descriptive title and description
+   - Link to related issues
+   - Include testing evidence
+
+2. **Code Review**:
+   - Address reviewer feedback
+   - Ensure CI checks pass
+   - Update documentation if needed
+
+3. **Merge Requirements**:
+   - All tests passing
+   - Code review approval
+   - Documentation updated
+   - Security scan clean
 
 ## 📄 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
----.
+---
+
+## 🚀 Quick Start Commands
+
+```bash
+# Complete setup
+git clone https://github.com/triplom/infrastructure-repo.git
+cd infrastructure-repo
+./kind/setup-kind.sh
+./infrastructure/github-registry/github-setup.sh
+
+# Deploy everything
+gh workflow run deploy-infrastructure.yaml -F environment=dev -F component=all
+gh workflow run deploy-monitoring.yaml -F environment=dev
+gh workflow run deploy-apps.yaml -F environment=dev
+
+# Access dashboards
+kubectl --context kind-dev-cluster -n monitoring port-forward svc/kube-prometheus-stack-grafana 3000:80
+
+# Promote to production
+gh workflow run ci-pipeline.yaml -F environment=prod -F component=all -F action=promote
+
+```
+
+For detailed documentation, troubleshooting guides, and advanced configurations, visit our [Wiki](https://github.com/triplom/infrastructure-repo/wiki).
