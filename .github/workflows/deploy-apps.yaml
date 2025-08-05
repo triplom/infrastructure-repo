@@ -111,7 +111,7 @@ jobs:
         id: kubeconfig
         env:
           ENV: ${{ needs.validate.outputs.environment }}
-          CLUSTER: ${{ github.event.client_payload.cluster || format('kind-{0}-cluster', needs.validate.outputs.environment) }}
+          #CLUSTER: ${{ github.event.client_payload.cluster || format('kind-{0}-cluster', needs.validate.outputs.environment) }}
 
           # Use environment-specific secrets
           KUBECONFIG_DEV: ${{ secrets.KUBECONFIG_DEV }}
