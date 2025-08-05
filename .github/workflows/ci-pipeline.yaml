@@ -14,7 +14,7 @@ on:
         type: choice
         options:
           - dev
-          - int
+          - qa
           - prod
       component:
         description: 'Component to deploy'
@@ -290,6 +290,7 @@ jobs:
               "ref": "${{ github.ref }}",
               "version": "${{ github.sha }}",
               "environment": "${{ env.ENVIRONMENT }}",
+              "cluster": "kind-${{ env.ENVIRONMENT }}-cluster",
               "triggered_by": "${{ github.actor }}",
               "commit_sha": "${{ github.sha }}",
               "workflow_run_id": "${{ github.run_id }}"
@@ -309,6 +310,7 @@ jobs:
               "ref": "${{ github.ref }}",
               "version": "${{ github.sha }}",
               "environment": "${{ env.ENVIRONMENT }}",
+              "cluster": "kind-${{ env.ENVIRONMENT }}-cluster",
               "triggered_by": "${{ github.actor }}",
               "commit_sha": "${{ github.sha }}",
               "workflow_run_id": "${{ github.run_id }}"
@@ -328,6 +330,7 @@ jobs:
               "ref": "${{ github.ref }}",
               "version": "${{ github.sha }}",
               "environment": "${{ env.ENVIRONMENT }}",
+              "cluster": "kind-${{ env.ENVIRONMENT }}-cluster",
               "triggered_by": "${{ github.actor }}",
               "commit_sha": "${{ github.sha }}",
               "workflow_run_id": "${{ github.run_id }}"
@@ -356,19 +359,24 @@ jobs:
           
           # Determine source environment for promotion
           case "${{ env.TARGET_ENV }}" in
-            "int")
+            "qa")
               SOURCE_ENV="dev"
+              SOURCE_CLUSTER="kind-dev-cluster"
+              TARGET_CLUSTER="kind-qa-cluster"
               ;;
             "prod")
-              SOURCE_ENV="int"
+              SOURCE_ENV="qa"
+              SOURCE_CLUSTER="kind-qa-cluster"
+              TARGET_CLUSTER="kind-prod-cluster"
               ;;
             *)
-              echo "::error::Invalid promotion target. Can only promote to 'int' or 'prod'"
+              echo "::error::Invalid promotion target. Can only promote to 'qa' or 'prod'"
+              echo "::error::Promotion flow: dev → qa → prod"
               exit 1
               ;;
           esac
           
-          echo "🚀 Promoting from $SOURCE_ENV to ${{ env.TARGET_ENV }}"
+          echo "🚀 Promoting from $SOURCE_ENV (${SOURCE_CLUSTER}) to ${{ env.TARGET_ENV }} (${TARGET_CLUSTER})"
           
           # Function to promote a single app
           promote_app() {
@@ -437,12 +445,9 @@ jobs:
           if git diff --staged --quiet; then
             echo "ℹ️  No changes to commit"
           else
-            git commit -m "🚀 Promote ${{ env.COMPONENT }} from $SOURCE_ENV to ${{ env.TARGET_ENV }}"
+            git commit -m "🚀 Promote ${{ env.COMPONENT }} from $SOURCE_ENV to ${{ env.TARGET_ENV }} (${SOURCE_CLUSTER} → ${TARGET_CLUSTER})"
             git push
             echo "✅ Promotion completed successfully"
-            
-            # Trigger deployment to target environment
-            echo "🎯 Triggering deployment to ${{ env.TARGET_ENV }}"
           fi
 
       - name: Trigger deployment after promotion
@@ -459,6 +464,7 @@ jobs:
               "ref": "refs/heads/main",
               "version": "promoted",
               "environment": "${{ env.TARGET_ENV }}",
+              "cluster": "kind-${{ env.TARGET_ENV }}-cluster",
               "triggered_by": "${{ github.actor }}",
               "commit_sha": "promotion",
               "workflow_run_id": "${{ github.run_id }}",
@@ -474,13 +480,27 @@ jobs:
       - name: Notify deployment status
         run: |
           if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ github.event.inputs.action }}" == "promote" ]]; then
+            # Determine cluster names for promotion
+            case "${{ github.event.inputs.environment }}" in
+              "qa")
+                SOURCE_CLUSTER="kind-dev-cluster"
+                TARGET_CLUSTER="kind-qa-cluster"
+                ;;
+              "prod")
+                SOURCE_CLUSTER="kind-qa-cluster"
+                TARGET_CLUSTER="kind-prod-cluster"
+                ;;
+            esac
+            
             echo "🚀 Promotion workflow completed"
             echo "• Component: ${{ github.event.inputs.component }}"
-            echo "• Target Environment: ${{ github.event.inputs.environment }}"
+            echo "• Source: ${SOURCE_CLUSTER}"
+            echo "• Target: ${TARGET_CLUSTER}"
             echo "• Status: ${{ job.status }}"
           else
             echo "🏗️  Build and deployment workflow completed"
             echo "• Components: ${{ needs.detect-changes.outputs.matrix }}"
             echo "• Environment: ${{ github.event.inputs.environment || 'dev' }}"
+            echo "• Cluster: kind-${{ github.event.inputs.environment || 'dev' }}-cluster"
             echo "• Status: ${{ job.status }}"
           fi
