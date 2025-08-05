@@ -204,42 +204,198 @@ jobs:
           APP="${{ needs.validate.outputs.application }}"
           APP_VERSION="${{ github.event.client_payload.version }}"
           APP_PATH="external-app"
+          ENV="${{ needs.validate.outputs.environment }}"
           
           echo "📦 Preparing external application: $APP"
           echo "📋 Version: $APP_VERSION"
+          echo "🌍 Environment: $ENV"
           
-          # Check if we need to copy files to the apps directory
-          if [ -d "$APP_PATH/k8s" ] || [ -d "$APP_PATH/deploy" ] || [ -d "$APP_PATH/manifests" ]; then
-            echo "Found deployment manifests in external repository"
+          # Ensure app directory structure exists
+          mkdir -p "apps/$APP/overlays/$ENV"
+          mkdir -p "apps/$APP/base"
+          
+          # Look for deployment manifests in various standard locations
+          DEPLOY_DIRS=("k8s" "kubernetes" "deploy" "manifests" "deployment" ".k8s")
+          FOUND_DEPLOY_DIR=""
+          
+          echo "🔍 Searching for deployment manifests..."
+          for dir in "${DEPLOY_DIRS[@]}"; do
+            if [ -d "$APP_PATH/$dir" ]; then
+              FOUND_DEPLOY_DIR="$APP_PATH/$dir"
+              echo "✅ Found deployment manifests in: $FOUND_DEPLOY_DIR"
+              break
+            fi
+          done
+          
+          # If no standard deployment directory found, check for existing kubernetes directory from your app
+          if [ -z "$FOUND_DEPLOY_DIR" ] && [ -d "$APP_PATH/kubernetes" ]; then
+            FOUND_DEPLOY_DIR="$APP_PATH/kubernetes"
+            echo "✅ Found Kubernetes manifests in: $FOUND_DEPLOY_DIR"
+          fi
+          
+          if [ -n "$FOUND_DEPLOY_DIR" ]; then
+            echo "📂 Copying manifests from $FOUND_DEPLOY_DIR to apps/$APP"
             
-            # Ensure app directory exists
-            mkdir -p "apps/$APP/overlays/$ENV"
-            
-            # Find the deployment directory in external repo
-            DEPLOY_DIR=""
-            for dir in "k8s" "deploy" "manifests"; do
-              if [ -d "$APP_PATH/$dir" ]; then
-                DEPLOY_DIR="$APP_PATH/$dir"
-                break
-              fi
-            done
-            
-            # Copy deployment files
-            if [ -n "$DEPLOY_DIR" ]; then
-              echo "Copying manifests from $DEPLOY_DIR to apps/$APP"
-              cp -r "$DEPLOY_DIR"/* "apps/$APP/"
+            # Copy all deployment files
+            cp -r "$FOUND_DEPLOY_DIR"/* "apps/$APP/" 2>/dev/null || {
+              echo "::warning::Failed to copy all files, trying individual copy"
+              # Try copying specific subdirectories
+              for subdir in base overlays; do
+                if [ -d "$FOUND_DEPLOY_DIR/$subdir" ]; then
+                  echo "Copying $subdir directory..."
+                  cp -r "$FOUND_DEPLOY_DIR/$subdir" "apps/$APP/"
+                fi
+              done
               
-              # Replace version tags if needed
-              find "apps/$APP" -type f -name "*.yaml" -exec sed -i "s/\${VERSION}/$APP_VERSION/g" {} \;
-              find "apps/$APP" -type f -name "*.yaml" -exec sed -i "s/\${TAG}/$APP_VERSION/g" {} \;
+              # Copy individual yaml files
+              find "$FOUND_DEPLOY_DIR" -maxdepth 1 -name "*.yaml" -o -name "*.yml" | while read file; do
+                if [ -f "$file" ]; then
+                  echo "Copying $(basename "$file")..."
+                  cp "$file" "apps/$APP/"
+                fi
+              done
+            }
+            
+            # Replace version placeholders in all yaml files
+            echo "🔄 Updating version tags to: $APP_VERSION"
+            find "apps/$APP" -type f \( -name "*.yaml" -o -name "*.yml" \) -exec sed -i "s/\${VERSION}/$APP_VERSION/g" {} \;
+            find "apps/$APP" -type f \( -name "*.yaml" -o -name "*.yml" \) -exec sed -i "s/\${TAG}/$APP_VERSION/g" {} \;
+            find "apps/$APP" -type f \( -name "*.yaml" -o -name "*.yml" \) -exec sed -i "s/:latest/:$APP_VERSION/g" {} \;
+            
+            # Update image tags in kustomization files if they exist
+            if [ -f "apps/$APP/overlays/$ENV/kustomization.yaml" ]; then
+              echo "📝 Updating kustomization.yaml with version: $APP_VERSION"
+              cd "apps/$APP/overlays/$ENV"
+              
+              # Use kustomize to update image tags
+              if command -v kustomize &> /dev/null; then
+                # Update common image patterns for your app
+                kustomize edit set image "php-fpm=ghcr.io/triplom/k8s-web-app-php/php-fpm:$APP_VERSION" 2>/dev/null || true
+                kustomize edit set image "nginx=ghcr.io/triplom/k8s-web-app-php/nginx:$APP_VERSION" 2>/dev/null || true
+                
+                # Also try with repository name
+                kustomize edit set image "ghcr.io/triplom/k8s-web-app-php/php-fpm=ghcr.io/triplom/k8s-web-app-php/php-fpm:$APP_VERSION" 2>/dev/null || true
+                kustomize edit set image "ghcr.io/triplom/k8s-web-app-php/nginx=ghcr.io/triplom/k8s-web-app-php/nginx:$APP_VERSION" 2>/dev/null || true
+              else
+                # Fallback: direct sed replacement in kustomization.yaml
+                sed -i "s/newTag: .*/newTag: $APP_VERSION/g" kustomization.yaml 2>/dev/null || true
+              fi
+              
+              cd - > /dev/null
             fi
+            
+            # If base kustomization exists, update it too
+            if [ -f "apps/$APP/base/kustomization.yaml" ]; then
+              echo "📝 Updating base kustomization.yaml"
+              cd "apps/$APP/base"
+              sed -i "s/newTag: .*/newTag: $APP_VERSION/g" kustomization.yaml 2>/dev/null || true
+              cd - > /dev/null
+            fi
+            
           else
-            echo "No standard deployment directory found in external repo"
-            # Check for custom deploy script
+            echo "⚠️  No standard deployment directory found in external repository"
+            echo "📁 Available directories in external repo:"
+            ls -la "$APP_PATH/" || true
+            
+            # Check for custom deploy script as fallback
             if [ -f "$APP_PATH/deploy.sh" ]; then
-              echo "Found deploy.sh script in external repository"
-              chmod +x "$APP_PATH/deploy.sh"
+              echo "✅ Found deploy.sh script in external repository"
+              cp "$APP_PATH/deploy.sh" "apps/$APP/"
+              chmod +x "apps/$APP/deploy.sh"
+            else
+              # Create basic deployment structure if nothing found
+              echo "🏗️  Creating basic deployment structure for $APP"
+              
+              # Create a basic kustomization structure
+              cat > "apps/$APP/overlays/$ENV/kustomization.yaml" << EOF
+          apiVersion: kustomize.config.k8s.io/v1beta1
+          kind: Kustomization
+          
+          namespace: $APP-$ENV
+          
+          resources:
+          - ../../base
+          
+          images:
+          - name: php-fpm
+            newName: ghcr.io/triplom/k8s-web-app-php/php-fpm
+            newTag: $APP_VERSION
+          - name: nginx
+            newName: ghcr.io/triplom/k8s-web-app-php/nginx
+            newTag: $APP_VERSION
+          EOF
+              
+              # Create basic base kustomization
+              cat > "apps/$APP/base/kustomization.yaml" << EOF
+          apiVersion: kustomize.config.k8s.io/v1beta1
+          kind: Kustomization
+          
+          resources:
+          - deployment.yaml
+          - service.yaml
+          
+          commonLabels:
+            app: $APP
+          EOF
+              
+              # Create basic deployment
+              cat > "apps/$APP/base/deployment.yaml" << EOF
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: $APP
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: $APP
+            template:
+              metadata:
+                labels:
+                  app: $APP
+              spec:
+                imagePullSecrets:
+                  - name: github-registry-secret
+                containers:
+                  - name: php-fpm
+                    image: php-fpm
+                    ports:
+                      - containerPort: 9000
+                  - name: nginx
+                    image: nginx
+                    ports:
+                      - containerPort: 80
+          EOF
+              
+              # Create basic service
+              cat > "apps/$APP/base/service.yaml" << EOF
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: $APP-service
+          spec:
+            selector:
+              app: $APP
+            ports:
+              - port: 80
+                targetPort: 80
+            type: ClusterIP
+          EOF
+              
+              echo "✅ Created basic deployment structure"
             fi
+          fi
+          
+          # Verify the final structure
+          echo "📋 Final deployment structure created:"
+          find "apps/$APP" -type f \( -name "*.yaml" -o -name "*.yml" -o -name "*.sh" \) | sort
+          
+          # Show content of key files for debugging
+          echo "🔍 Key configuration files:"
+          if [ -f "apps/$APP/overlays/$ENV/kustomization.yaml" ]; then
+            echo "--- apps/$APP/overlays/$ENV/kustomization.yaml ---"
+            cat "apps/$APP/overlays/$ENV/kustomization.yaml"
+            echo "--- End of kustomization.yaml ---"
           fi
 
       - name: Deploy Applications
