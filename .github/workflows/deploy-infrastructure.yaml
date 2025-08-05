@@ -139,7 +139,7 @@ jobs:
       - name: Setup Kubeconfig
         id: kubeconfig
         env:
-          ENV: ${{ needs.validate-prerequisites.outputs.environment }}
+          ENV: ${{ needs.validate-prerequisites.outputs.environment }}          
           # Use environment-specific secrets
           KUBECONFIG_DEV: ${{ secrets.KUBECONFIG_DEV }}
           KUBECONFIG_QA: ${{ secrets.KUBECONFIG_QA }}
