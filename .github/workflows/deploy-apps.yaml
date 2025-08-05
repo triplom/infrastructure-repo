@@ -482,37 +482,14 @@ jobs:
                   # Copy GitHub registry secret
                   copy_registry_secret "$app-$env" "$deploy_log" "$error_log"
                   
-                  # Try kustomize overlay first
+                  # Deploy directly from external repo
                   if [ -d "$found_external_dir/overlays/$env" ]; then
                     echo "Using Kustomize overlay from external repo: $found_external_dir/overlays/$env" | tee -a "$deploy_log"
-                    
-                    # Update image tags in kustomization if needed
-                    if [ -f "$found_external_dir/overlays/$env/kustomization.yaml" ]; then
-                      local temp_kustomization=$(mktemp)
-                      cp "$found_external_dir/overlays/$env/kustomization.yaml" "$temp_kustomization"
-                      
-                      # Replace version placeholders
-                      sed -i "s/\${VERSION}/${{ github.event.client_payload.version }}/g" "$temp_kustomization"
-                      sed -i "s/:latest/:${{ github.event.client_payload.version }}/g" "$temp_kustomization"
-                      
-                      # Apply with temporary file
-                      kubectl apply --validate=false -k "$(dirname "$temp_kustomization")" 2> >(tee -a "$error_log" >&2) | tee -a "$deploy_log"
-                      local apply_result=${PIPESTATUS[0]}
-                      
-                      rm -f "$temp_kustomization"
-                      
-                      if [ $apply_result -ne 0 ]; then
-                        echo "::error::Failed to deploy $app with external Kustomize" | tee -a "$error_log"
-                        return 1
-                      fi
-                    else
-                      kubectl apply --validate=false -k "$found_external_dir/overlays/$env" 2> >(tee -a "$error_log" >&2) | tee -a "$deploy_log"
-                      if [ ${PIPESTATUS[0]} -ne 0 ]; then
-                        echo "::error::Failed to deploy $app with external Kustomize" | tee -a "$error_log"
-                        return 1
-                      fi
+                    kubectl apply --validate=false -k "$found_external_dir/overlays/$env" 2> >(tee -a "$error_log" >&2) | tee -a "$deploy_log"
+                    if [ ${PIPESTATUS[0]} -ne 0 ]; then
+                      echo "::error::Failed to deploy $app with external Kustomize" | tee -a "$error_log"
+                      return 1
                     fi
-                  # Try plain YAML files
                   elif [ -d "$found_external_dir/$env" ]; then
                     echo "Using plain YAML files from external repo: $found_external_dir/$env" | tee -a "$deploy_log"
                     kubectl apply --validate=false -f "$found_external_dir/$env" 2> >(tee -a "$error_log" >&2) | tee -a "$deploy_log"
@@ -520,14 +497,9 @@ jobs:
                       echo "::error::Failed to deploy $app with external YAML" | tee -a "$error_log"
                       return 1
                     fi
-                  else
-                    echo "::error::No suitable deployment method found in external repository" | tee -a "$error_log"
-                    return 1
                   fi
                 else
                   echo "::error::No deployment directory found in external repository" | tee -a "$error_log"
-                  echo "Available directories in external-app:" | tee -a "$deploy_log"
-                  ls -la "$app_path/" | tee -a "$deploy_log"
                   return 1
                 fi
               fi
@@ -600,36 +572,64 @@ jobs:
               # Copy GitHub registry secret from container-auth namespace
               copy_registry_secret "$app-$env" "$deploy_log" "$error_log"
               
-              # For external apps, update version in kustomization
+              # For external apps, we need to handle the deployment differently to preserve relative paths
               if [[ "${{ github.event_name }}" == "repository_dispatch" && "$app" == "${{ github.event.client_payload.app_name }}" ]]; then
                 echo "Updating image versions for external app deployment" | tee -a "$deploy_log"
+                
+                # Check if kustomization file exists
                 local kustomization_file="apps/$app/overlays/$env/kustomization.yaml"
-                if [ -f "$kustomization_file" ]; then
-                  # Create a temporary copy with updated versions
-                  local temp_dir=$(mktemp -d)
-                  cp -r "apps/$app/overlays/$env"/* "$temp_dir/"
-                  
-                  # Update the temporary kustomization file
-                  sed -i "s/\${VERSION}/${{ github.event.client_payload.version }}/g" "$temp_dir/kustomization.yaml"
-                  sed -i "s/:latest/:${{ github.event.client_payload.version }}/g" "$temp_dir/kustomization.yaml"
-                  
-                  # Apply from temporary directory
-                  kubectl apply --validate=false -k "$temp_dir" 2> >(tee -a "$error_log" >&2) | tee -a "$deploy_log"
-                  local apply_result=${PIPESTATUS[0]}
-                  
-                  # Cleanup
-                  rm -rf "$temp_dir"
-                  
-                  if [ $apply_result -ne 0 ]; then
-                    echo "::error::Failed to deploy $app with Kustomize" | tee -a "$error_log"
-                    return 1
-                  fi
-                else
+                if [ ! -f "$kustomization_file" ]; then
                   echo "::error::kustomization.yaml not found in apps/$app/overlays/$env" | tee -a "$error_log"
                   return 1
                 fi
+                
+                # Create a complete temporary copy of the app directory to preserve relative paths
+                local temp_app_dir=$(mktemp -d)
+                echo "Creating temporary deployment directory: $temp_app_dir" | tee -a "$deploy_log"
+                
+                # Copy the entire app structure to temp directory
+                cp -r "apps/$app"/* "$temp_app_dir/"
+                
+                # Update versions in the temporary copy
+                find "$temp_app_dir" -type f \( -name "*.yaml" -o -name "*.yml" \) -exec sed -i "s/\${VERSION}/${{ github.event.client_payload.version }}/g" {} \;
+                find "$temp_app_dir" -type f \( -name "*.yaml" -o -name "*.yml" \) -exec sed -i "s/:latest/:${{ github.event.client_payload.version }}/g" {} \;
+                
+                # Update image tags in kustomization files
+                if [ -f "$temp_app_dir/overlays/$env/kustomization.yaml" ]; then
+                  cd "$temp_app_dir/overlays/$env"
+                  
+                  # Use kustomize to update image tags if available
+                  if command -v kustomize &> /dev/null; then
+                    echo "Using kustomize to update image tags" | tee -a "$deploy_log"
+                    kustomize edit set image "php-fpm=ghcr.io/triplom/k8s-web-app-php/php-fpm:${{ github.event.client_payload.version }}" 2>/dev/null || true
+                    kustomize edit set image "nginx=ghcr.io/triplom/k8s-web-app-php/nginx:${{ github.event.client_payload.version }}" 2>/dev/null || true
+                  else
+                    # Fallback: direct sed replacement
+                    echo "Using sed to update image tags" | tee -a "$deploy_log"
+                    sed -i "s/newTag: .*/newTag: ${{ github.event.client_payload.version }}/g" kustomization.yaml 2>/dev/null || true
+                  fi
+                  
+                  # Show the updated kustomization file
+                  echo "📄 Updated kustomization.yaml:" | tee -a "$deploy_log"
+                  cat kustomization.yaml | tee -a "$deploy_log"
+                  
+                  cd - > /dev/null
+                fi
+                
+                # Apply from the temporary directory (this preserves relative paths)
+                echo "Applying kustomization from temporary directory" | tee -a "$deploy_log"
+                kubectl apply --validate=false -k "$temp_app_dir/overlays/$env" 2> >(tee -a "$error_log" >&2) | tee -a "$deploy_log"
+                local apply_result=${PIPESTATUS[0]}
+                
+                # Cleanup temporary directory
+                rm -rf "$temp_app_dir"
+                
+                if [ $apply_result -ne 0 ]; then
+                  echo "::error::Failed to deploy $app with Kustomize" | tee -a "$error_log"
+                  return 1
+                fi
               else
-                # Standard kustomize apply
+                # Standard kustomize apply for internal apps
                 kubectl apply --validate=false -k "apps/$app/overlays/$env" 2> >(tee -a "$error_log" >&2) | tee -a "$deploy_log"
                 if [ ${PIPESTATUS[0]} -ne 0 ]; then
                   echo "::error::Failed to deploy $app with Kustomize" | tee -a "$error_log"
