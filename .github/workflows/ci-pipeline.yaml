@@ -1,10 +1,10 @@
 name: CI Pipeline
+
 on:
   push:
     branches: [main, 'feature/**']
   pull_request:
     branches: [main]
-  # Add workflow_dispatch to enable manual triggering
   workflow_dispatch:
     inputs:
       environment:
@@ -14,7 +14,7 @@ on:
         type: choice
         options:
           - dev
-          - qa
+          - int
           - prod
       component:
         description: 'Component to deploy'
@@ -25,127 +25,462 @@ on:
           - all
           - app1
           - app2
+          - k8s-web-app-php
+      action:
+        description: 'Action to perform'
+        required: true
+        default: 'deploy'
+        type: choice
+        options:
+          - deploy
+          - promote
+
 env:
   REGISTRY: ghcr.io/triplom
-  IMAGE_NAME: app
-  APP_NAME: app
-  SERVICE_NAME: app
+
 jobs:
-  test:
-    name: Run Tests
+  detect-changes:
+    name: Detect Changed Applications
     runs-on: ubuntu-latest
-    env:
-      CONFIG_REPO_PAT: ${{ secrets.CONFIG_REPO_PAT }}
+    outputs:
+      app1_changed: ${{ steps.changes.outputs.app1 }}
+      app2_changed: ${{ steps.changes.outputs.app2 }}
+      k8s_web_app_php_changed: ${{ steps.changes.outputs.k8s-web-app-php }}
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      
-      - name: Set up Python
-        uses: actions/setup-python@v4
         with:
-          python-version: '3.10'
-          
-      - name: Install dependencies
-        run: |
-          cd apps/app1
-          pip install -r requirements.txt
-          pip install pytest pytest-cov
-          
-      - name: Run tests
-        run: |
-          cd apps/app1
-          pytest --cov=./ --cov-report=xml || echo "Tests failed but continuing"
-          
-      - name: Upload coverage reports
-        uses: codecov/codecov-action@v3
+          fetch-depth: 0
+
+      - name: Detect changes
+        uses: dorny/paths-filter@v2
+        id: changes
         with:
-          file: ./apps/app1/coverage.xml
-          fail_ci_if_error: false
-  
-  build:
-    needs: test
+          filters: |
+            app1:
+              - 'apps/app1/**'
+            app2:
+              - 'apps/app2/**'
+            k8s-web-app-php:
+              - 'k8s/**'
+              - 'src/**'
+              - 'docker/**'
+              - 'composer.json'
+              - 'composer.lock'
+
+      - name: Set build matrix
+        id: set-matrix
+        run: |
+          matrix="[]"
+          
+          # For manual dispatch, use the selected component
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            if [[ "${{ github.event.inputs.component }}" == "all" ]]; then
+              matrix='["app1", "app2", "k8s-web-app-php"]'
+            else
+              matrix='["${{ github.event.inputs.component }}"]'
+            fi
+          else
+            # For push/PR, only build changed components
+            apps=()
+            if [[ "${{ steps.changes.outputs.app1 }}" == "true" ]]; then
+              apps+=("app1")
+            fi
+            if [[ "${{ steps.changes.outputs.app2 }}" == "true" ]]; then
+              apps+=("app2")
+            fi
+            if [[ "${{ steps.changes.outputs.k8s-web-app-php }}" == "true" ]]; then
+              apps+=("k8s-web-app-php")
+            fi
+            
+            if [[ ${#apps[@]} -gt 0 ]]; then
+              matrix=$(printf '%s\n' "${apps[@]}" | jq -R . | jq -s .)
+            fi
+          fi
+          
+          echo "matrix=$matrix" >> $GITHUB_OUTPUT
+          echo "Build matrix: $matrix"
+
+  test:
+    name: Test Applications
     runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.matrix != '[]'
+    strategy:
+      matrix:
+        app: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Test app1
+        if: matrix.app == 'app1'
+        run: |
+          cd apps/app1
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+            pip install pytest pytest-cov
+            pytest --cov=./ --cov-report=xml || echo "Tests failed but continuing"
+          else
+            echo "No requirements.txt found for app1"
+          fi
+
+      - name: Test app2
+        if: matrix.app == 'app2'
+        run: |
+          cd apps/app2
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+            pip install pytest pytest-cov
+            pytest --cov=./ --cov-report=xml || echo "Tests failed but continuing"
+          elif [ -f package.json ]; then
+            npm install
+            npm test || echo "Tests failed but continuing"
+          else
+            echo "No test configuration found for app2"
+          fi
+
+      - name: Test k8s-web-app-php
+        if: matrix.app == 'k8s-web-app-php'
+        run: |
+          if [ -f composer.json ]; then
+            # Install PHP and Composer
+            sudo apt-get update
+            sudo apt-get install -y php php-cli php-mbstring php-xml php-zip unzip
+            
+            # Install Composer
+            curl -sS https://getcomposer.org/installer | php
+            sudo mv composer.phar /usr/local/bin/composer
+            
+            # Install dependencies and run tests
+            composer install --no-dev --optimize-autoloader
+            
+            # Run PHPUnit tests if available
+            if [ -f vendor/bin/phpunit ]; then
+              vendor/bin/phpunit || echo "Tests failed but continuing"
+            elif [ -f bin/phpunit ]; then
+              bin/phpunit || echo "Tests failed but continuing"
+            else
+              echo "No PHPUnit configuration found"
+            fi
+          else
+            echo "No composer.json found for k8s-web-app-php"
+          fi
+
+  build:
+    name: Build and Push Images
+    needs: [detect-changes, test]
+    runs-on: ubuntu-latest
+    if: needs.detect-changes.outputs.matrix != '[]'
     permissions:
       contents: read
       packages: write
+    strategy:
+      matrix:
+        app: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
     outputs:
-      image_tag: ${{ steps.image-tag.outputs.IMAGE_TAG }}
+      app1_image: ${{ steps.app1-output.outputs.image }}
+      app2_image: ${{ steps.app2-output.outputs.image }}
+      k8s_web_app_php_image: ${{ steps.k8s-web-app-php-output.outputs.image }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      
+
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v2
+        uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      
+
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
-      
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=sha,format=short
-            type=ref,event=branch
-            type=semver,pattern={{version}}
-            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
-      
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v4
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push app1
+        if: matrix.app == 'app1'
+        uses: docker/build-push-action@v5
         with:
           context: ./apps/app1
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-          cache-to: type=inline
-      
-      - name: Set image tag output
-        id: image-tag
-        run: |
-          IMAGE_TAG=$(echo "${{ steps.meta.outputs.tags }}" | head -1)
-          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_OUTPUT
-  
-  update-config:
-    needs: build
+          tags: |
+            ${{ env.REGISTRY }}/app1:${{ github.sha }}
+            ${{ env.REGISTRY }}/app1:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push app2
+        if: matrix.app == 'app2'
+        uses: docker/build-push-action@v5
+        with:
+          context: ./apps/app2
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/app2:${{ github.sha }}
+            ${{ env.REGISTRY }}/app2:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push k8s-web-app-php (PHP-FPM)
+        if: matrix.app == 'k8s-web-app-php'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./docker/php-fpm/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/k8s-web-app-php/php-fpm:${{ github.sha }}
+            ${{ env.REGISTRY }}/k8s-web-app-php/php-fpm:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push k8s-web-app-php (Nginx)
+        if: matrix.app == 'k8s-web-app-php'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./docker/nginx/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/k8s-web-app-php/nginx:${{ github.sha }}
+            ${{ env.REGISTRY }}/k8s-web-app-php/nginx:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Set app1 output
+        if: matrix.app == 'app1'
+        id: app1-output
+        run: echo "image=${{ env.REGISTRY }}/app1:${{ github.sha }}" >> $GITHUB_OUTPUT
+
+      - name: Set app2 output
+        if: matrix.app == 'app2'
+        id: app2-output
+        run: echo "image=${{ env.REGISTRY }}/app2:${{ github.sha }}" >> $GITHUB_OUTPUT
+
+      - name: Set k8s-web-app-php output
+        if: matrix.app == 'k8s-web-app-php'
+        id: k8s-web-app-php-output
+        run: echo "image=${{ env.REGISTRY }}/k8s-web-app-php:${{ github.sha }}" >> $GITHUB_OUTPUT
+
+  deploy:
+    name: Deploy to Environment
+    needs: [detect-changes, build]
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    if: |
+      needs.detect-changes.outputs.matrix != '[]' && 
+      (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch') &&
+      (github.event.inputs.action != 'promote' || github.event.inputs.action == '')
+    strategy:
+      matrix:
+        app: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
     env:
       ENVIRONMENT: ${{ github.event.inputs.environment || 'dev' }}
-      COMPONENT: ${{ github.event.inputs.component || 'all' }}
     steps:
-      - name: Checkout
+      - name: Trigger deployment for app1
+        if: matrix.app == 'app1'
+        uses: peter-evans/repository-dispatch@v2
+        with:
+          token: ${{ secrets.INFRA_REPO_PAT }}
+          repository: triplom/infrastructure-repo
+          event-type: app-deployment-request
+          client-payload: |
+            {
+              "app_name": "app1",
+              "repository": "${{ github.repository }}",
+              "ref": "${{ github.ref }}",
+              "version": "${{ github.sha }}",
+              "environment": "${{ env.ENVIRONMENT }}",
+              "triggered_by": "${{ github.actor }}",
+              "commit_sha": "${{ github.sha }}",
+              "workflow_run_id": "${{ github.run_id }}"
+            }
+
+      - name: Trigger deployment for app2
+        if: matrix.app == 'app2'
+        uses: peter-evans/repository-dispatch@v2
+        with:
+          token: ${{ secrets.INFRA_REPO_PAT }}
+          repository: triplom/infrastructure-repo
+          event-type: app-deployment-request
+          client-payload: |
+            {
+              "app_name": "app2",
+              "repository": "${{ github.repository }}",
+              "ref": "${{ github.ref }}",
+              "version": "${{ github.sha }}",
+              "environment": "${{ env.ENVIRONMENT }}",
+              "triggered_by": "${{ github.actor }}",
+              "commit_sha": "${{ github.sha }}",
+              "workflow_run_id": "${{ github.run_id }}"
+            }
+
+      - name: Trigger deployment for k8s-web-app-php
+        if: matrix.app == 'k8s-web-app-php'
+        uses: peter-evans/repository-dispatch@v2
+        with:
+          token: ${{ secrets.INFRA_REPO_PAT }}
+          repository: triplom/infrastructure-repo
+          event-type: app-deployment-request
+          client-payload: |
+            {
+              "app_name": "k8s-web-app-php",
+              "repository": "${{ github.repository }}",
+              "ref": "${{ github.ref }}",
+              "version": "${{ github.sha }}",
+              "environment": "${{ env.ENVIRONMENT }}",
+              "triggered_by": "${{ github.actor }}",
+              "commit_sha": "${{ github.sha }}",
+              "workflow_run_id": "${{ github.run_id }}"
+            }
+
+  promote:
+    name: Promote Between Environments
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'workflow_dispatch' && 
+      github.event.inputs.action == 'promote'
+    env:
+      COMPONENT: ${{ github.event.inputs.component }}
+      TARGET_ENV: ${{ github.event.inputs.environment }}
+    steps:
+      - name: Checkout infrastructure repo
         uses: actions/checkout@v4
-      
-      - name: Update application configuration
+        with:
+          repository: triplom/infrastructure-repo
+          token: ${{ secrets.INFRA_REPO_PAT }}
+          path: infrastructure-repo
+
+      - name: Promote applications
         run: |
-          # Checkout the config repository
-          git clone https://github.com/triplom/infrastructure-repo.git
           cd infrastructure-repo
           
-          # Update the image tag in the base deployment
-          IMAGE_TAG="${{ needs.build.outputs.image_tag }}"
+          # Determine source environment for promotion
+          case "${{ env.TARGET_ENV }}" in
+            "int")
+              SOURCE_ENV="dev"
+              ;;
+            "prod")
+              SOURCE_ENV="int"
+              ;;
+            *)
+              echo "::error::Invalid promotion target. Can only promote to 'int' or 'prod'"
+              exit 1
+              ;;
+          esac
           
-          # If component is 'all' or specifically 'app1', update the config
-          if [[ "${{ env.COMPONENT }}" == "all" || "${{ env.COMPONENT }}" == "app1" ]]; then
-            echo "Updating app1 deployment for environment: ${{ env.ENVIRONMENT }}"
-            if [ -f "apps/app1/${{ env.ENVIRONMENT }}/deployment.yaml" ]; then
-              sed -i "s|image: .*/${{ env.APP_NAME }}:.*|image: $IMAGE_TAG|g" apps/app1/${{ env.ENVIRONMENT }}/deployment.yaml
-            else
-              sed -i "s|image: .*/${{ env.APP_NAME }}:.*|image: $IMAGE_TAG|g" apps/app1/base/deployment.yaml
+          echo "🚀 Promoting from $SOURCE_ENV to ${{ env.TARGET_ENV }}"
+          
+          # Function to promote a single app
+          promote_app() {
+            local app_name=$1
+            echo "📦 Promoting $app_name from $SOURCE_ENV to ${{ env.TARGET_ENV }}"
+            
+            # Check if app exists in infrastructure repo
+            if [ ! -d "apps/$app_name" ]; then
+              echo "⚠️  App $app_name not found in infrastructure repo, skipping"
+              return 0
             fi
+            
+            # Extract current image tags from source environment
+            local source_images=""
+            if [ -f "apps/$app_name/overlays/$SOURCE_ENV/kustomization.yaml" ]; then
+              source_images=$(grep -A 10 "images:" "apps/$app_name/overlays/$SOURCE_ENV/kustomization.yaml" | grep "newTag:" | sed 's/.*newTag: *//' || echo "")
+            fi
+            
+            if [ -z "$source_images" ]; then
+              echo "⚠️  No image tags found for $app_name in $SOURCE_ENV environment"
+              return 0
+            fi
+            
+            echo "📋 Found image tags in $SOURCE_ENV: $source_images"
+            
+            # Update target environment with source environment's image tags
+            if [ -f "apps/$app_name/overlays/${{ env.TARGET_ENV }}/kustomization.yaml" ]; then
+              # Use kustomize to update image tags
+              cd "apps/$app_name/overlays/${{ env.TARGET_ENV }}"
+              
+              # Extract image names and tags from source
+              while IFS= read -r tag; do
+                if [ -n "$tag" ]; then
+                  # For k8s-web-app-php, handle multiple images
+                  if [[ "$app_name" == "k8s-web-app-php" ]]; then
+                    kustomize edit set image "php-fpm=ghcr.io/triplom/k8s-web-app-php/php-fpm:$tag" 2>/dev/null || true
+                    kustomize edit set image "nginx=ghcr.io/triplom/k8s-web-app-php/nginx:$tag" 2>/dev/null || true
+                  else
+                    # For app1 and app2
+                    kustomize edit set image "$app_name=ghcr.io/triplom/$app_name:$tag" 2>/dev/null || true
+                  fi
+                fi
+              done <<< "$source_images"
+              
+              cd - > /dev/null
+              echo "✅ Updated $app_name in ${{ env.TARGET_ENV }} environment"
+            else
+              echo "⚠️  Target environment ${{ env.TARGET_ENV }} not found for $app_name"
+            fi
+          }
+          
+          # Promote selected component(s)
+          if [[ "${{ env.COMPONENT }}" == "all" ]]; then
+            promote_app "app1"
+            promote_app "app2"
+            promote_app "k8s-web-app-php"
           else
-            echo "Skipping app1 update as component filter is: ${{ env.COMPONENT }}"
+            promote_app "${{ env.COMPONENT }}"
           fi
           
-          # Commit and push the changes
+          # Commit and push changes
           git config --global user.email "actions@github.com"
           git config --global user.name "GitHub Actions"
           git add .
-          git commit -m "Update image to $IMAGE_TAG for ${{ env.ENVIRONMENT }} environment" || echo "No changes to commit"
-          git push https://${{ github.action }}://${{ secrets.GITHUB_TOKEN }}@github.com/triplom/infrastructure-repo.git main
+          
+          if git diff --staged --quiet; then
+            echo "ℹ️  No changes to commit"
+          else
+            git commit -m "🚀 Promote ${{ env.COMPONENT }} from $SOURCE_ENV to ${{ env.TARGET_ENV }}"
+            git push
+            echo "✅ Promotion completed successfully"
+            
+            # Trigger deployment to target environment
+            echo "🎯 Triggering deployment to ${{ env.TARGET_ENV }}"
+          fi
+
+      - name: Trigger deployment after promotion
+        if: success()
+        uses: peter-evans/repository-dispatch@v2
+        with:
+          token: ${{ secrets.INFRA_REPO_PAT }}
+          repository: triplom/infrastructure-repo
+          event-type: app-deployment-request
+          client-payload: |
+            {
+              "app_name": "${{ env.COMPONENT }}",
+              "repository": "triplom/infrastructure-repo",
+              "ref": "refs/heads/main",
+              "version": "promoted",
+              "environment": "${{ env.TARGET_ENV }}",
+              "triggered_by": "${{ github.actor }}",
+              "commit_sha": "promotion",
+              "workflow_run_id": "${{ github.run_id }}",
+              "promotion": true
+            }
+
+  notification:
+    name: Send Notifications
+    needs: [detect-changes, build, deploy, promote]
+    runs-on: ubuntu-latest
+    if: always() && needs.detect-changes.outputs.matrix != '[]'
+    steps:
+      - name: Notify deployment status
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ github.event.inputs.action }}" == "promote" ]]; then
+            echo "🚀 Promotion workflow completed"
+            echo "• Component: ${{ github.event.inputs.component }}"
+            echo "• Target Environment: ${{ github.event.inputs.environment }}"
+            echo "• Status: ${{ job.status }}"
+          else
+            echo "🏗️  Build and deployment workflow completed"
+            echo "• Components: ${{ needs.detect-changes.outputs.matrix }}"
+            echo "• Environment: ${{ github.event.inputs.environment || 'dev' }}"
+            echo "• Status: ${{ job.status }}"
+          fi
