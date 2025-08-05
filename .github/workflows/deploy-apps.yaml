@@ -211,11 +211,10 @@ jobs:
           echo "🌍 Environment: $ENV"
           
           # Ensure app directory structure exists
-          mkdir -p "apps/$APP/overlays/$ENV"
-          mkdir -p "apps/$APP/base"
+          mkdir -p "apps/$APP"
           
-          # Look for deployment manifests in various standard locations
-          DEPLOY_DIRS=("k8s" "kubernetes" "deploy" "manifests" "deployment" ".k8s")
+          # Look for deployment manifests - prioritize k8s directory
+          DEPLOY_DIRS=("k8s" "kubernetes" "deploy" "manifests" "deployment")
           FOUND_DEPLOY_DIR=""
           
           echo "🔍 Searching for deployment manifests..."
@@ -227,132 +226,84 @@ jobs:
             fi
           done
           
-          # If no standard deployment directory found, check for existing kubernetes directory from your app
-          if [ -z "$FOUND_DEPLOY_DIR" ] && [ -d "$APP_PATH/kubernetes" ]; then
-            FOUND_DEPLOY_DIR="$APP_PATH/kubernetes"
-            echo "✅ Found Kubernetes manifests in: $FOUND_DEPLOY_DIR"
-          fi
-          
           if [ -n "$FOUND_DEPLOY_DIR" ]; then
             echo "📂 Copying manifests from $FOUND_DEPLOY_DIR to apps/$APP"
             
-            # Copy all deployment files
+            # Copy the entire k8s directory structure
             cp -r "$FOUND_DEPLOY_DIR"/* "apps/$APP/" 2>/dev/null || {
-              echo "::warning::Failed to copy all files, trying individual copy"
-              # Try copying specific subdirectories
-              for subdir in base overlays; do
-                if [ -d "$FOUND_DEPLOY_DIR/$subdir" ]; then
-                  echo "Copying $subdir directory..."
-                  cp -r "$FOUND_DEPLOY_DIR/$subdir" "apps/$APP/"
-                fi
-              done
-              
-              # Copy individual yaml files
-              find "$FOUND_DEPLOY_DIR" -maxdepth 1 -name "*.yaml" -o -name "*.yml" | while read file; do
-                if [ -f "$file" ]; then
-                  echo "Copying $(basename "$file")..."
-                  cp "$file" "apps/$APP/"
-                fi
-              done
+              echo "::error::Failed to copy deployment files from $FOUND_DEPLOY_DIR"
+              exit 1
             }
             
-            # Replace version placeholders in all yaml files
-            echo "🔄 Updating version tags to: $APP_VERSION"
-            find "apps/$APP" -type f \( -name "*.yaml" -o -name "*.yml" \) -exec sed -i "s/\${VERSION}/$APP_VERSION/g" {} \;
-            find "apps/$APP" -type f \( -name "*.yaml" -o -name "*.yml" \) -exec sed -i "s/\${TAG}/$APP_VERSION/g" {} \;
-            find "apps/$APP" -type f \( -name "*.yaml" -o -name "*.yml" \) -exec sed -i "s/:latest/:$APP_VERSION/g" {} \;
+            # Fix filename typos (kustomatization -> kustomization)
+            echo "🔧 Fixing filename typos..."
+            find "apps/$APP" -name "kustomatization.yaml" -exec sh -c 'mv "$1" "$(dirname "$1")/kustomization.yaml"' _ {} \; 2>/dev/null || true
+            find "apps/$APP" -name "kustomatization.yml" -exec sh -c 'mv "$1" "$(dirname "$1")/kustomization.yml"' _ {} \; 2>/dev/null || true
             
-            # Update image tags in kustomization files if they exist
-            if [ -f "apps/$APP/overlays/$ENV/kustomization.yaml" ]; then
-              echo "📝 Updating kustomization.yaml with version: $APP_VERSION"
-              cd "apps/$APP/overlays/$ENV"
-              
-              # Use kustomize to update image tags
-              if command -v kustomize &> /dev/null; then
-                # Update common image patterns for your app
-                kustomize edit set image "php-fpm=ghcr.io/triplom/k8s-web-app-php/php-fpm:$APP_VERSION" 2>/dev/null || true
-                kustomize edit set image "nginx=ghcr.io/triplom/k8s-web-app-php/nginx:$APP_VERSION" 2>/dev/null || true
-                
-                # Also try with repository name
-                kustomize edit set image "ghcr.io/triplom/k8s-web-app-php/php-fpm=ghcr.io/triplom/k8s-web-app-php/php-fpm:$APP_VERSION" 2>/dev/null || true
-                kustomize edit set image "ghcr.io/triplom/k8s-web-app-php/nginx=ghcr.io/triplom/k8s-web-app-php/nginx:$APP_VERSION" 2>/dev/null || true
-              else
-                # Fallback: direct sed replacement in kustomization.yaml
-                sed -i "s/newTag: .*/newTag: $APP_VERSION/g" kustomization.yaml 2>/dev/null || true
-              fi
-              
-              cd - > /dev/null
-            fi
+            # Show what we actually copied
+            echo "📋 Files copied to apps/$APP:"
+            find "apps/$APP" -type f | sort
             
-            # If base kustomization exists, update it too
-            if [ -f "apps/$APP/base/kustomization.yaml" ]; then
-              echo "📝 Updating base kustomization.yaml"
-              cd "apps/$APP/base"
-              sed -i "s/newTag: .*/newTag: $APP_VERSION/g" kustomization.yaml 2>/dev/null || true
-              cd - > /dev/null
-            fi
-            
-          else
-            echo "⚠️  No standard deployment directory found in external repository"
-            echo "📁 Available directories in external repo:"
-            ls -la "$APP_PATH/" || true
-            
-            # Check for custom deploy script as fallback
-            if [ -f "$APP_PATH/deploy.sh" ]; then
-              echo "✅ Found deploy.sh script in external repository"
-              cp "$APP_PATH/deploy.sh" "apps/$APP/"
-              chmod +x "apps/$APP/deploy.sh"
+            # Debug: Show content of key files before modification
+            echo "🔍 Base deployment file content:"
+            if [ -f "apps/$APP/base/deployment.yaml" ]; then
+              echo "--- apps/$APP/base/deployment.yaml ---"
+              head -20 "apps/$APP/base/deployment.yaml"
+              echo "--- End of base deployment.yaml (first 20 lines) ---"
             else
-              # Create basic deployment structure if nothing found
-              echo "🏗️  Creating basic deployment structure for $APP"
+              echo "⚠️  No deployment.yaml found in base directory"
+              ls -la "apps/$APP/base/" || true
+            fi
+            
+            echo "🔍 Patch file content:"
+            if [ -f "apps/$APP/overlays/$ENV/patches.yaml" ]; then
+              echo "--- apps/$APP/overlays/$ENV/patches.yaml ---"
+              cat "apps/$APP/overlays/$ENV/patches.yaml"
+              echo "--- End of patches.yaml ---"
+            else
+              echo "⚠️  No patches.yaml found"
+            fi
+            
+            # Extract deployment name from base deployment file
+            DEPLOYMENT_NAME=""
+            if [ -f "apps/$APP/base/deployment.yaml" ]; then
+              DEPLOYMENT_NAME=$(grep -A 5 "kind: Deployment" "apps/$APP/base/deployment.yaml" | grep "name:" | head -1 | sed 's/.*name: *//' | tr -d '"' | tr -d "'" | xargs)
+              echo "📝 Found deployment name in base: '$DEPLOYMENT_NAME'"
+            else
+              echo "⚠️  No deployment.yaml found in base, checking for other deployment files"
+              # Look for any deployment files
+              DEPLOY_FILES=$(find "apps/$APP/base" -name "*.yaml" -exec grep -l "kind: Deployment" {} \; 2>/dev/null || true)
+              if [ -n "$DEPLOY_FILES" ]; then
+                echo "Found deployment files: $DEPLOY_FILES"
+                for file in $DEPLOY_FILES; do
+                  DEPLOYMENT_NAME=$(grep -A 5 "kind: Deployment" "$file" | grep "name:" | head -1 | sed 's/.*name: *//' | tr -d '"' | tr -d "'" | xargs)
+                  if [ -n "$DEPLOYMENT_NAME" ]; then
+                    echo "📝 Found deployment name in $file: '$DEPLOYMENT_NAME'"
+                    break
+                  fi
+                done
+              fi
+            fi
+            
+            # If no deployment found, check if we need to create one
+            if [ -z "$DEPLOYMENT_NAME" ]; then
+              echo "⚠️  No deployment found in base. Creating basic deployment."
+              DEPLOYMENT_NAME="k8s-web-app-php"
               
-              # Create a basic kustomization structure
-              cat > "apps/$APP/overlays/$ENV/kustomization.yaml" << EOF
-          apiVersion: kustomize.config.k8s.io/v1beta1
-          kind: Kustomization
-          
-          namespace: $APP-$ENV
-          
-          resources:
-          - ../../base
-          
-          images:
-          - name: php-fpm
-            newName: ghcr.io/triplom/k8s-web-app-php/php-fpm
-            newTag: $APP_VERSION
-          - name: nginx
-            newName: ghcr.io/triplom/k8s-web-app-php/nginx
-            newTag: $APP_VERSION
-          EOF
-              
-              # Create basic base kustomization
-              cat > "apps/$APP/base/kustomization.yaml" << EOF
-          apiVersion: kustomize.config.k8s.io/v1beta1
-          kind: Kustomization
-          
-          resources:
-          - deployment.yaml
-          - service.yaml
-          
-          commonLabels:
-            app: $APP
-          EOF
-              
-              # Create basic deployment
               cat > "apps/$APP/base/deployment.yaml" << EOF
           apiVersion: apps/v1
           kind: Deployment
           metadata:
-            name: $APP
+            name: $DEPLOYMENT_NAME
           spec:
             replicas: 1
             selector:
               matchLabels:
-                app: $APP
+                app: k8s-web-app-php
             template:
               metadata:
                 labels:
-                  app: $APP
+                  app: k8s-web-app-php
               spec:
                 imagePullSecrets:
                   - name: github-registry-secret
@@ -361,42 +312,162 @@ jobs:
                     image: php-fpm
                     ports:
                       - containerPort: 9000
+                    env:
+                      - name: APP_ENV
+                        value: "$ENV"
                   - name: nginx
                     image: nginx
                     ports:
                       - containerPort: 80
           EOF
               
-              # Create basic service
-              cat > "apps/$APP/base/service.yaml" << EOF
-          apiVersion: v1
-          kind: Service
-          metadata:
-            name: $APP-service
-          spec:
-            selector:
-              app: $APP
-            ports:
-              - port: 80
-                targetPort: 80
-            type: ClusterIP
+              # Update base kustomization to include deployment.yaml
+              if [ -f "apps/$APP/base/kustomization.yaml" ]; then
+                if ! grep -q "deployment.yaml" "apps/$APP/base/kustomization.yaml"; then
+                  sed -i '/resources:/a \ \ - deployment.yaml' "apps/$APP/base/kustomization.yaml"
+                fi
+              else
+                cat > "apps/$APP/base/kustomization.yaml" << EOF
+          apiVersion: kustomize.config.k8s.io/v1beta1
+          kind: Kustomization
+          
+          resources:
+            - deployment.yaml
+          
+          images:
+            - name: php-fpm
+              newName: ghcr.io/triplom/k8s-web-app-php/php-fpm
+              newTag: $APP_VERSION
+            - name: nginx
+              newName: ghcr.io/triplom/k8s-web-app-php/nginx
+              newTag: $APP_VERSION
+          
+          commonLabels:
+            app: k8s-web-app-php
           EOF
+              fi
               
-              echo "✅ Created basic deployment structure"
+              echo "✅ Created basic deployment: $DEPLOYMENT_NAME"
             fi
+            
+            # Fix patch file if it exists and has wrong deployment name
+            if [ -f "apps/$APP/overlays/$ENV/patches.yaml" ] && [ -n "$DEPLOYMENT_NAME" ]; then
+              echo "🔧 Validating and fixing patch file"
+              
+              # Check if patch has the correct deployment name
+              PATCH_DEPLOYMENT_NAME=$(grep -A 5 "kind: Deployment" "apps/$APP/overlays/$ENV/patches.yaml" | grep "name:" | head -1 | sed 's/.*name: *//' | tr -d '"' | tr -d "'" | xargs 2>/dev/null || echo "")
+              echo "📝 Found deployment name in patch: '$PATCH_DEPLOYMENT_NAME'"
+              
+              if [ -n "$PATCH_DEPLOYMENT_NAME" ] && [ "$DEPLOYMENT_NAME" != "$PATCH_DEPLOYMENT_NAME" ]; then
+                echo "🔧 Fixing deployment name mismatch in patches.yaml: '$PATCH_DEPLOYMENT_NAME' -> '$DEPLOYMENT_NAME'"
+                sed -i "s/name: $PATCH_DEPLOYMENT_NAME/name: $DEPLOYMENT_NAME/g" "apps/$APP/overlays/$ENV/patches.yaml"
+              elif [ -z "$PATCH_DEPLOYMENT_NAME" ]; then
+                echo "⚠️  Patch file doesn't specify deployment name, adding it"
+                # Add name to patch if missing
+                sed -i '/kind: Deployment/a \ \ name: '"$DEPLOYMENT_NAME" "apps/$APP/overlays/$ENV/patches.yaml"
+              fi
+              
+              # Show updated patch file
+              echo "📄 Updated patch file:"
+              cat "apps/$APP/overlays/$ENV/patches.yaml"
+            elif [ -f "apps/$APP/overlays/$ENV/patches.yaml" ]; then
+              echo "⚠️  Patch file exists but no deployment name found. Removing patches to avoid errors."
+              # Comment out the patches in kustomization to avoid errors
+              if [ -f "apps/$APP/overlays/$ENV/kustomization.yaml" ]; then
+                sed -i 's/^patchesStrategicMerge:/#patchesStrategicMerge:/' "apps/$APP/overlays/$ENV/kustomization.yaml"
+                sed -i 's/^- patches.yaml/#- patches.yaml/' "apps/$APP/overlays/$ENV/kustomization.yaml"
+                echo "✅ Disabled problematic patches in kustomization.yaml"
+              fi
+            fi
+            
+            # Replace version placeholders in all yaml files
+            echo "🔄 Updating version tags to: $APP_VERSION"
+            find "apps/$APP" -type f \( -name "*.yaml" -o -name "*.yml" \) -exec sed -i "s/\${VERSION}/$APP_VERSION/g" {} \;
+            find "apps/$APP" -type f \( -name "*.yaml" -o -name "*.yml" \) -exec sed -i "s/\${TAG}/$APP_VERSION/g" {} \;
+            find "apps/$APP" -type f \( -name "*.yaml" -o -name "*.yml" \) -exec sed -i "s/:latest/:$APP_VERSION/g" {} \;
+            
+            # Update kustomization files with correct image tags
+            if [ -f "apps/$APP/overlays/$ENV/kustomization.yaml" ]; then
+              echo "📝 Updating overlay kustomization.yaml with version: $APP_VERSION"
+              cd "apps/$APP/overlays/$ENV"
+              
+              # Use kustomize to update image tags if available
+              if command -v kustomize &> /dev/null; then
+                echo "Using kustomize to update image tags"
+                kustomize edit set image "php-fpm=ghcr.io/triplom/k8s-web-app-php/php-fpm:$APP_VERSION" 2>/dev/null || true
+                kustomize edit set image "nginx=ghcr.io/triplom/k8s-web-app-php/nginx:$APP_VERSION" 2>/dev/null || true
+              else
+                # Fallback: direct sed replacement
+                echo "Using sed to update image tags"
+                sed -i "s/newTag: .*/newTag: $APP_VERSION/g" kustomization.yaml 2>/dev/null || true
+              fi
+              
+              cd - > /dev/null
+            fi
+            
+            # Test kustomization build to catch errors early
+            echo "🔍 Testing kustomization build..."
+            if [ -d "apps/$APP/overlays/$ENV" ]; then
+              cd "apps/$APP/overlays/$ENV"
+              
+              if command -v kustomize &> /dev/null; then
+                if ! kustomize build . > /tmp/kustomize-test.yaml 2>&1; then
+                  echo "⚠️  Kustomize build failed. Error output:"
+                  cat /tmp/kustomize-test.yaml
+                  
+                  echo "🔧 Attempting to fix by removing patches..."
+                  # Remove patches if they're causing issues
+                  sed -i 's/^patchesStrategicMerge:/#patchesStrategicMerge:/' kustomization.yaml 2>/dev/null || true
+                  sed -i 's/^- patches.yaml/#- patches.yaml/' kustomization.yaml 2>/dev/null || true
+                  
+                  # Test again
+                  if kustomize build . > /tmp/kustomize-test2.yaml 2>&1; then
+                    echo "✅ Kustomization fixed by removing patches"
+                  else
+                    echo "❌ Kustomization still failing:"
+                    cat /tmp/kustomize-test2.yaml
+                  fi
+                else
+                  echo "✅ Kustomization build successful"
+                fi
+              fi
+              
+              cd - > /dev/null
+            fi
+            
+          else
+            echo "::error::No deployment directory found in external repository"
+            echo "Available directories:"
+            ls -la "$APP_PATH/"
+            exit 1
           fi
           
-          # Verify the final structure
-          echo "📋 Final deployment structure created:"
+          # Final verification and display
+          echo "📋 Final deployment structure:"
           find "apps/$APP" -type f \( -name "*.yaml" -o -name "*.yml" -o -name "*.sh" \) | sort
           
-          # Show content of key files for debugging
-          echo "🔍 Key configuration files:"
+          # Show key files content for debugging
+          echo "🔍 Final configuration files:"
+          
+          if [ -f "apps/$APP/base/kustomization.yaml" ]; then
+            echo "--- apps/$APP/base/kustomization.yaml ---"
+            cat "apps/$APP/base/kustomization.yaml"
+            echo "--- End of base kustomization.yaml ---"
+          fi
+          
           if [ -f "apps/$APP/overlays/$ENV/kustomization.yaml" ]; then
             echo "--- apps/$APP/overlays/$ENV/kustomization.yaml ---"
             cat "apps/$APP/overlays/$ENV/kustomization.yaml"
-            echo "--- End of kustomization.yaml ---"
+            echo "--- End of overlay kustomization.yaml ---"
           fi
+          
+          if [ -f "apps/$APP/overlays/$ENV/patches.yaml" ]; then
+            echo "--- apps/$APP/overlays/$ENV/patches.yaml (final) ---"
+            cat "apps/$APP/overlays/$ENV/patches.yaml"
+            echo "--- End of patches.yaml ---"
+          fi
+          
+          echo "✅ External app preparation completed"
 
       - name: Deploy Applications
         run: |
