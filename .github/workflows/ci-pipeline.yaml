@@ -14,7 +14,7 @@ on:
         type: choice
         options:
           - dev
-          - test
+          - qa
           - prod
       component:
         description: 'Component to deploy'
@@ -24,11 +24,12 @@ on:
         options:
           - all
           - app1
+          - app2
 env:
-  APP_NAME: app1
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/app1
-
+  REGISTRY: ghcr.io/triplom
+  IMAGE_NAME: app
+  APP_NAME: app
+  SERVICE_NAME: app
 jobs:
   test:
     name: Run Tests
@@ -46,19 +47,19 @@ jobs:
           
       - name: Install dependencies
         run: |
-          cd src/app1
+          cd apps/app1
           pip install -r requirements.txt
           pip install pytest pytest-cov
           
       - name: Run tests
         run: |
-          cd src/app1
+          cd apps/app1
           pytest --cov=./ --cov-report=xml || echo "Tests failed but continuing"
           
       - name: Upload coverage reports
         uses: codecov/codecov-action@v3
         with:
-          file: ./src/app1/coverage.xml
+          file: ./apps/app1/coverage.xml
           fail_ci_if_error: false
   
   build:
@@ -97,7 +98,7 @@ jobs:
       - name: Build and push Docker image
         uses: docker/build-push-action@v4
         with:
-          context: ./src/app1
+          context: ./apps/app1
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
