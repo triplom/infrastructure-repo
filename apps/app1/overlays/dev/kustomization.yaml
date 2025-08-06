@@ -22,10 +22,3 @@ configMapGenerator:
   literals:
   - ENVIRONMENT=dev
   - LOG_LEVEL=DEBUG
-
-# REMOVED: This is causing the conflict because the secret is already being created in the pipeline
-# secretGenerator:
-# - name: github-registry-secret
-#   namespace: app1-dev
-#   type: kubernetes.io/dockerconfigjson
-#   behavior: replace
