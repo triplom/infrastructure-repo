@@ -13,9 +13,9 @@ def hello():
     env = os.getenv('ENV', 'unknown')
     logger.info(f"Hello endpoint accessed, environment: {env}")
     return jsonify({
-        "message": f"Hello from App2!",
+        "message": f"Hello from App1!",
         "environment": env,
-        "app": "app2",
+        "app": "app1",
         "version": "1.0.0"
     })
 
@@ -24,26 +24,15 @@ def health():
     logger.info("Health check endpoint accessed")
     return jsonify({
         "status": "healthy", 
-        "app": "app2",
+        "app": "app1",
         "version": "1.0.0"
-    })
-
-@app.route('/api/data')
-def get_data():
-    """Sample API endpoint"""
-    return jsonify({
-        "data": [
-            {"id": 1, "name": "Item 1"},
-            {"id": 2, "name": "Item 2"}
-        ],
-        "app": "app2"
     })
 
 @app.route('/metrics')
 def metrics():
     """Basic metrics endpoint for monitoring"""
     return jsonify({
-        "app": "app2",
+        "app": "app1",
         "status": "running",
         "environment": os.getenv('ENV', 'unknown')
     })
@@ -52,5 +41,5 @@ if __name__ == '__main__':
     port = int(os.getenv('PORT', 8000))
     debug = os.getenv('DEBUG', 'false').lower() == 'true'
     
-    logger.info(f"Starting App2 on port {port}, debug={debug}")
+    logger.info(f"Starting App1 on port {port}, debug={debug}")
     app.run(host='0.0.0.0', port=port, debug=debug)
