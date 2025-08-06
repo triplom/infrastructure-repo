@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
       - name: app2
-        image: ghcr.io/triplom/app2:qa  # Replace with your actual image path and tag
+        image: ghcr.io/triplom/app2:latest  # Replace with your actual image path and tag
         env:
         - name: ENVIRONMENT
           value: "Integration"
