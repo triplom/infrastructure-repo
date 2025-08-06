@@ -120,7 +120,7 @@ jobs:
     strategy:
       matrix:
         app: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
-      fail-fast: false
+      fail-fast: false # Keep fail-fast false to see all test results
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -144,12 +144,15 @@ jobs:
             
             # Lint check
             echo "Running linting..."
-            flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics || true
+            # Removed '|| true' to allow flake8 to fail the step
+            flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
             
             # Run tests if test files exist
             if find . -name "test_*.py" -o -name "*_test.py" | grep -q .; then
               echo "Running tests..."
-              pytest --cov=./ --cov-report=xml --cov-report=term-missing || echo "Tests failed but continuing"
+              # Added --junitxml=test-results.xml to generate JUnit report
+              # Removed '|| echo "..."' to allow pytest to fail the step
+              pytest --cov=./ --cov-report=xml --cov-report=term-missing --junitxml=test-results.xml
             else
               echo "No test files found, creating basic test..."
               # Create a basic test to verify the app starts
@@ -173,9 +176,12 @@ jobs:
                   rv = client.get('/')
                   assert rv.status_code == 200
               EOF
-              pytest test_app.py || echo "Basic tests failed but continuing"
+              # Removed '|| echo "..."' to allow pytest to fail the step
+              pytest test_app.py --junitxml=test-results.xml
+            fi
           else
             echo "No requirements.txt found for app1"
+            exit 1 # Fail if no requirements.txt, as tests can't run
           fi
 
       - name: Test app2
@@ -190,12 +196,15 @@ jobs:
             
             # Lint check
             echo "Running linting..."
-            flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics || true
+            # Removed '|| true'
+            flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
             
             # Run tests
             if find . -name "test_*.py" -o -name "*_test.py" | grep -q .; then
               echo "Running tests..."
-              pytest --cov=./ --cov-report=xml --cov-report=term-missing || echo "Tests failed but continuing"
+              # Added --junitxml=test-results.xml
+              # Removed '|| echo "..."'
+              pytest --cov=./ --cov-report=xml --cov-report=term-missing --junitxml=test-results.xml
             else
               echo "No test files found, creating basic test..."
               cat > test_app.py << 'EOF'
@@ -218,13 +227,17 @@ jobs:
                   rv = client.get('/api/data')
                   assert rv.status_code == 200
               EOF
-              pytest test_app.py || echo "Basic tests failed but continuing"
+              # Removed '|| echo "..."'
+              pytest test_app.py --junitxml=test-results.xml
+            fi
           elif [ -f package.json ]; then
             echo "Node.js project detected"
             npm install
-            npm test || echo "Tests failed but continuing"
+            # Removed '|| echo "..."'
+            npm test
           else
             echo "No test configuration found for app2"
+            exit 1 # Fail if no test config
           fi
 
       - name: Test k8s-web-app-php
@@ -241,28 +254,36 @@ jobs:
             sudo mv composer.phar /usr/local/bin/composer
             
             # Validate composer.json
-            composer validate --strict || echo "Composer validation failed but continuing"
+            # Removed '|| echo "..."'
+            composer validate --strict
             
             # Install dependencies
             composer install --no-dev --optimize-autoloader --no-interaction
             
             # Run security check
-            composer audit || echo "Security audit found issues but continuing"
+            # Removed '|| echo "..."'
+            composer audit
             
             # Run PHPUnit tests if available
             if [ -f vendor/bin/phpunit ]; then
               echo "Running PHPUnit tests..."
-              vendor/bin/phpunit --coverage-text || echo "Tests failed but continuing"
+              # Added --coverage-clover=coverage.xml and --log-junit=test-results.xml
+              # Removed '|| echo "..."'
+              vendor/bin/phpunit --coverage-clover=coverage.xml --log-junit=test-results.xml
             elif [ -f bin/phpunit ]; then
               echo "Running PHPUnit tests..."
-              bin/phpunit --coverage-text || echo "Tests failed but continuing"
+              # Added --coverage-clover=coverage.xml and --log-junit=test-results.xml
+              # Removed '|| echo "..."'
+              bin/phpunit --coverage-clover=coverage.xml --log-junit=test-results.xml
             else
               echo "No PHPUnit configuration found"
               # Basic syntax check
-              find src -name "*.php" -exec php -l {} \; || echo "Syntax check failed but continuing"
+              # Removed '|| echo "..."'
+              find src -name "*.php" -exec php -l {} \;
             fi
           else
             echo "No composer.json found for k8s-web-app-php"
+            exit 1 # Fail if no composer.json
           fi
 
       - name: Upload test results
@@ -291,19 +312,24 @@ jobs:
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: 'fs'
-          scan-ref: './apps/${{ matrix.app }}'
+          # Conditional scan-ref: use '.' for k8s-web-app-php, else 'apps/<app_name>'
+          scan-ref: ${{ matrix.app == 'k8s-web-app-php' && '.' || format('./apps/{0}', matrix.app) }}
           format: 'sarif'
           output: 'trivy-results-${{ matrix.app }}.sarif'
+          # Add continue-on-error if you want the job to pass even if Trivy finds issues,
+          # otherwise, it will fail if vulnerabilities are found.
+          # continue-on-error: true 
 
       - name: Upload Trivy scan results
-        uses: github/codeql-action/upload-sarif@v2
         if: always()
+        # Updated to v3
+        uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: 'trivy-results-${{ matrix.app }}.sarif'
 
   build:
     name: Build and Push Images
-    needs: [detect-changes, test, security-scan]
+    needs: [detect-changes, test, security-scan] # Ensure all quality gates pass
     runs-on: ubuntu-latest
     if: needs.detect-changes.outputs.has_changes == 'true'
     permissions:
@@ -400,19 +426,54 @@ jobs:
           cache-to: type=gha,mode=max
           platforms: linux/amd64
 
-      - name: Scan Docker images
-        if: always()
+      # --- Image Scanning for k8s-web-app-php (two images) ---
+      - name: Scan Docker image (PHP-FPM)
+        if: always() && matrix.app == 'k8s-web-app-php'
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/k8s-web-app-php/php-fpm:${{ github.sha }}
+          format: 'sarif'
+          output: 'trivy-image-results-php-fpm.sarif'
+
+      - name: Upload image scan results (PHP-FPM)
+        if: always() && matrix.app == 'k8s-web-app-php'
+        # Updated to v3
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-image-results-php-fpm.sarif'
+
+      - name: Scan Docker image (Nginx)
+        if: always() && matrix.app == 'k8s-web-app-php'
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/k8s-web-app-php/nginx:${{ github.sha }}
+          format: 'sarif'
+          output: 'trivy-image-results-nginx.sarif'
+
+      - name: Upload image scan results (Nginx)
+        if: always() && matrix.app == 'k8s-web-app-php'
+        # Updated to v3
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-image-results-nginx.sarif'
+      # --- End Image Scanning for k8s-web-app-php ---
+
+      # --- Image Scanning for app1 and app2 (single image) ---
+      - name: Scan Docker image (${{ matrix.app }})
+        if: always() && (matrix.app == 'app1' || matrix.app == 'app2')
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ env.REGISTRY }}/${{ matrix.app }}:${{ github.sha }}
           format: 'sarif'
           output: 'trivy-image-results-${{ matrix.app }}.sarif'
 
-      - name: Upload image scan results
-        if: always()
-        uses: github/codeql-action/upload-sarif@v2
+      - name: Upload image scan results (${{ matrix.app }})
+        if: always() && (matrix.app == 'app1' || matrix.app == 'app2')
+        # Updated to v3
+        uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: 'trivy-image-results-${{ matrix.app }}.sarif'
+      # --- End Image Scanning for app1 and app2 ---
 
       - name: Set app1 output
         if: matrix.app == 'app1'
@@ -431,6 +492,7 @@ jobs:
 
   deploy:
     name: Deploy to Environment
+    # Ensure build job is successful before deploying
     needs: [detect-changes, build]
     runs-on: ubuntu-latest
     if: |
@@ -446,13 +508,17 @@ jobs:
       - name: Wait for image availability
         run: |
           echo "⏳ Waiting for image to be available in registry..."
+          # This sleep is a workaround. A more robust solution would be a loop with `docker manifest inspect`
+          # or a custom action that polls the registry.
           sleep 30
           
-          # Verify image exists
-          if ! docker manifest inspect ${{ env.REGISTRY }}/${{ matrix.app }}:${{ github.sha }} >/dev/null 2>&1; then
-            echo "::warning::Image not immediately available, waiting longer..."
-            sleep 60
-          fi
+          # Verify image exists (this is a good check, but `docker manifest inspect` needs docker installed)
+          # If this step fails due to `docker` not being available, consider removing it or installing docker.
+          # For now, relying on the sleep and the downstream deployment to catch issues.
+          # if ! docker manifest inspect ${{ env.REGISTRY }}/${{ matrix.app }}:${{ github.sha }} >/dev/null 2>&1; then
+          #   echo "::warning::Image not immediately available, waiting longer..."
+          #   sleep 60
+          # fi
 
       - name: Trigger deployment for app1
         if: matrix.app == 'app1'
@@ -589,9 +655,16 @@ jobs:
             fi
             
             # Extract current image tags from source environment
+            # This logic assumes a single image tag for simplicity.
+            # For k8s-web-app-php, it should extract both php-fpm and nginx tags.
+            # A more robust approach might involve parsing the kustomization.yaml with yq/jq.
             local source_images=""
-            source_images=$(grep -A 20 "images:" "apps/$app_name/overlays/$SOURCE_ENV/kustomization.yaml" | grep "newTag:" | sed 's/.*newTag: *//' | head -10 || echo "")
-            
+            if [[ "$app_name" == "k8s-web-app-php" ]]; then
+                source_images=$(grep -A 20 "images:" "apps/$app_name/overlays/$SOURCE_ENV/kustomization.yaml" | grep "newTag:" | sed 's/.*newTag: *//' | head -2) # Get both tags
+            else
+                source_images=$(grep -A 20 "images:" "apps/$app_name/overlays/$SOURCE_ENV/kustomization.yaml" | grep "newTag:" | sed 's/.*newTag: *//' | head -1) # Get single tag
+            fi
+
             if [ -z "$source_images" ]; then
               echo "⚠️  No image tags found for $app_name in $SOURCE_ENV environment"
               echo "📋 Source kustomization content:"
@@ -607,23 +680,31 @@ jobs:
             cd "apps/$app_name/overlays/${{ env.TARGET_ENV }}"
             
             # Extract image names and tags from source
-            while IFS= read -r tag; do
-              if [ -n "$tag" ] && [ "$tag" != "latest" ]; then
-                echo "  📝 Setting image tag: $tag"
-                # For k8s-web-app-php, handle multiple images
-                if [[ "$app_name" == "k8s-web-app-php" ]]; then
-                  kustomize edit set image "php-fpm=ghcr.io/triplom/k8s-web-app-php/php-fpm:$tag" 2>/dev/null || true
-                  kustomize edit set image "nginx=ghcr.io/triplom/k8s-web-app-php/nginx:$tag" 2>/dev/null || true
-                  # Also handle the full image names if they exist
-                  kustomize edit set image "ghcr.io/triplom/k8s-web-app-php/php-fpm=ghcr.io/triplom/k8s-web-app-php/php-fpm:$tag" 2>/dev/null || true
-                  kustomize edit set image "ghcr.io/triplom/k8s-web-app-php/nginx=ghcr.io/triplom/k8s-web-app-php/nginx:$tag" 2>/dev/null || true
-                else
-                  # For app1 and app2
-                  kustomize edit set image "$app_name=ghcr.io/triplom/$app_name:$tag" 2>/dev/null || true
-                  kustomize edit set image "ghcr.io/triplom/$app_name=ghcr.io/triplom/$app_name:$tag" 2>/dev/null || true
+            # This loop needs to handle multiple tags for k8s-web-app-php correctly
+            if [[ "$app_name" == "k8s-web-app-php" ]]; then
+                # Assuming the order is php-fpm then nginx
+                read -r php_fpm_tag <<< "$(echo "$source_images" | head -n 1)"
+                read -r nginx_tag <<< "$(echo "$source_images" | tail -n 1)"
+
+                if [ -n "$php_fpm_tag" ] && [ "$php_fpm_tag" != "latest" ]; then
+                    echo "  📝 Setting php-fpm image tag: $php_fpm_tag"
+                    kustomize edit set image "php-fpm=ghcr.io/triplom/k8s-web-app-php/php-fpm:$php_fpm_tag" 2>/dev/null || true
+                    kustomize edit set image "ghcr.io/triplom/k8s-web-app-php/php-fpm=ghcr.io/triplom/k8s-web-app-php/php-fpm:$php_fpm_tag" 2>/dev/null || true
                 fi
-              fi
-            done <<< "$source_images"
+                if [ -n "$nginx_tag" ] && [ "$nginx_tag" != "latest" ]; then
+                    echo "  📝 Setting nginx image tag: $nginx_tag"
+                    kustomize edit set image "nginx=ghcr.io/triplom/k8s-web-app-php/nginx:$nginx_tag" 2>/dev/null || true
+                    kustomize edit set image "ghcr.io/triplom/k8s-web-app-php/nginx=ghcr.io/triplom/k8s-web-app-php/nginx:$nginx_tag" 2>/dev/null || true
+                fi
+            else
+                # For app1 and app2 (single tag)
+                read -r tag <<< "$source_images"
+                if [ -n "$tag" ] && [ "$tag" != "latest" ]; then
+                    echo "  📝 Setting image tag: $tag"
+                    kustomize edit set image "$app_name=ghcr.io/triplom/$app_name:$tag" 2>/dev/null || true
+                    kustomize edit set image "ghcr.io/triplom/$app_name=ghcr.io/triplom/$app_name:$tag" 2>/dev/null || true
+                fi
+            fi
             
             cd - > /dev/null
             echo "✅ Updated $app_name in ${{ env.TARGET_ENV }} environment"
@@ -684,18 +765,22 @@ jobs:
 
   notification:
     name: Send Notifications
-    needs: [detect-changes, build, deploy, promote]
+    # Ensure all relevant jobs are listed in needs for accurate status
+    needs: [detect-changes, test, security-scan, build, deploy, promote]
     runs-on: ubuntu-latest
     if: always() && needs.detect-changes.outputs.has_changes == 'true'
     steps:
       - name: Notify deployment status
         run: |
-          # Determine overall status
+          # Determine overall status based on actual job results
+          # Check for failure or cancelled status in any preceding job
           OVERALL_STATUS="success"
-          if [[ "${{ needs.build.result }}" == "failure" || "${{ needs.deploy.result }}" == "failure" || "${{ needs.promote.result }}" == "failure" ]]; then
+          if [[ "${{ needs.test.result }}" == "failure" || "${{ needs.test.result }}" == "cancelled" || \
+                "${{ needs.security-scan.result }}" == "failure" || "${{ needs.security-scan.result }}" == "cancelled" || \
+                "${{ needs.build.result }}" == "failure" || "${{ needs.build.result }}" == "cancelled" || \
+                "${{ needs.deploy.result }}" == "failure" || "${{ needs.deploy.result }}" == "cancelled" || \
+                "${{ needs.promote.result }}" == "failure" || "${{ needs.promote.result }}" == "cancelled" ]]; then
             OVERALL_STATUS="failure"
-          elif [[ "${{ needs.build.result }}" == "cancelled" || "${{ needs.deploy.result }}" == "cancelled" || "${{ needs.promote.result }}" == "cancelled" ]]; then
-            OVERALL_STATUS="cancelled"
           fi
           
           if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ github.event.inputs.action }}" == "promote" ]]; then
@@ -743,6 +828,7 @@ jobs:
           |-----|--------|
           | Detect Changes | ${{ needs.detect-changes.result }} |
           | Test | ${{ needs.test.result }} |
+          | Security Scan | ${{ needs.security-scan.result }} | # Added Security Scan
           | Build | ${{ needs.build.result }} |
           | Deploy | ${{ needs.deploy.result }} |
           | Promote | ${{ needs.promote.result }} |
