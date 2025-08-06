@@ -64,11 +64,7 @@ jobs:
             app2:
               - 'apps/app2/**'
             k8s-web-app-php:
-              - 'k8s/**'
-              - 'src/**'
-              - 'docker/**'
-              - 'composer.json'
-              - 'composer.lock'
+              - 'apps/k8s-web-app-php/**' # <--- CHANGED THIS BACK TO APPS/ PATH
             infrastructure:
               - 'apps/*/base/**'
               - 'apps/*/overlays/**'
@@ -80,6 +76,7 @@ jobs:
           matrix="[]"
           has_changes="false"
           
+          # For manual dispatch, use the selected component
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             if [[ "${{ github.event.inputs.component }}" == "all" ]]; then
               matrix='["app1", "app2", "k8s-web-app-php"]'
@@ -88,6 +85,7 @@ jobs:
             fi
             has_changes="true"
           else
+            # For push/PR, only build changed components
             apps=()
             if [[ "${{ steps.changes.outputs.app1 }}" == "true" ]]; then
               apps+=("app1")
@@ -118,7 +116,7 @@ jobs:
     strategy:
       matrix:
         app: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
-      fail-fast: false
+      fail-fast: false # Keep fail-fast false to see all test results
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -140,37 +138,41 @@ jobs:
             pip install -r requirements.txt
             pip install pytest pytest-cov flake8
             
+            # Lint check
             echo "Running linting..."
             flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
             
+            # Run tests if test files exist
             if find . -name "test_*.py" -o -name "*_test.py" | grep -q .; then
               echo "Running tests..."
               pytest --cov=./ --cov-report=xml --cov-report=term-missing --junitxml=test-results.xml
             else
               echo "No test files found, creating basic test..."
-              echo "import pytest" > test_app.py
-              echo "from app import app" >> test_app.py
-              echo "" >> test_app.py
-              echo "@pytest.fixture" >> test_app.py
-              echo "def client():" >> test_app.py
-              echo "    app.config['TESTING'] = True" >> test_app.py
-              echo "    with app.test_client() as client:" >> test_app.py
-              echo "        yield client" >> test_app.py
-              echo "" >> test_app.py
-              echo "def test_health_endpoint(client):" >> test_app.py
-              echo '    """Test health endpoint"""' >> test_app.py
-              echo "    rv = client.get('/health')" >> test_app.py
-              echo "    assert rv.status_code == 200" >> test_app.py
-              echo "" >> test_app.py
-              echo "def test_root_endpoint(client):" >> test_app.py
-              echo '    """Test root endpoint"""' >> test_app.py
-              echo "    rv = client.get('/')" >> test_app.py
-              echo "    assert rv.status_code == 200" >> test_app.py
+              cat > test_app.py << 'EOF'
+          import pytest
+          from app import app
+
+          @pytest.fixture
+          def client():
+              app.config['TESTING'] = True
+              with app.test_client() as client:
+                  yield client
+
+          def test_health_endpoint(client):
+              """Test health endpoint"""
+              rv = client.get('/health')
+              assert rv.status_code == 200
+              
+          def test_root_endpoint(client):
+              """Test root endpoint"""
+              rv = client.get('/')
+              assert rv.status_code == 200
+          EOF
               pytest test_app.py --junitxml=test-results.xml
             fi
           else
             echo "No requirements.txt found for app1"
-            exit 1
+            exit 1 # Fail if no requirements.txt, as tests can't run
           fi
 
       - name: Test app2
@@ -183,32 +185,36 @@ jobs:
             pip install -r requirements.txt
             pip install pytest pytest-cov flake8
             
+            # Lint check
             echo "Running linting..."
             flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
             
+            # Run tests
             if find . -name "test_*.py" -o -name "*_test.py" | grep -q .; then
               echo "Running tests..."
               pytest --cov=./ --cov-report=xml --cov-report=term-missing --junitxml=test-results.xml
             else
               echo "No test files found, creating basic test..."
-              echo "import pytest" > test_app.py
-              echo "from app import app" >> test_app.py
-              echo "" >> test_app.py
-              echo "@pytest.fixture" >> test_app.py
-              echo "def client():" >> test_app.py
-              echo "    app.config['TESTING'] = True" >> test_app.py
-              echo "    with app.test_client() as client:" >> test_app.py
-              echo "        yield client" >> test_app.py
-              echo "" >> test_app.py
-              echo "def test_health_endpoint(client):" >> test_app.py
-              echo '    """Test health endpoint"""' >> test_app.py
-              echo "    rv = client.get('/health')" >> test_app.py
-              echo "    assert rv.status_code == 200" >> test_app.py
-              echo "" >> test_app.py
-              echo "def test_api_data_endpoint(client):" >> test_app.py
-              echo '    """Test API data endpoint"""' >> test_app.py
-              echo "    rv = client.get('/api/data')" >> test_app.py
-              echo "    assert rv.status_code == 200" >> test_app.py
+              cat > test_app.py << 'EOF'
+          import pytest
+          from app import app
+
+          @pytest.fixture
+          def client():
+              app.config['TESTING'] = True
+              with app.test_client() as client:
+                  yield client
+
+          def test_health_endpoint(client):
+              """Test health endpoint"""
+              rv = client.get('/health')
+              assert rv.status_code == 200
+              
+          def test_api_data_endpoint(client):
+              """Test API data endpoint"""
+              rv = client.get('/api/data')
+              assert rv.status_code == 200
+          EOF
               pytest test_app.py --junitxml=test-results.xml
             fi
           elif [ -f package.json ]; then
@@ -217,26 +223,33 @@ jobs:
             npm test
           else
             echo "No test configuration found for app2"
-            exit 1
+            exit 1 # Fail if no test config
           fi
 
       - name: Test k8s-web-app-php
         if: matrix.app == 'k8s-web-app-php'
         run: |
+          cd apps/k8s-web-app-php # <--- ADDED THIS BACK
           echo "🧪 Testing k8s-web-app-php..."
           if [ -f composer.json ]; then
+            # Install PHP and required extensions
             sudo apt-get update
             sudo apt-get install -y php8.1 php8.1-cli php8.1-mbstring php8.1-xml php8.1-zip php8.1-curl unzip
             
+            # Install Composer
             curl -sS https://getcomposer.org/installer | php
             sudo mv composer.phar /usr/local/bin/composer
             
+            # Validate composer.json
             composer validate --strict
             
+            # Install dependencies
             composer install --no-dev --optimize-autoloader --no-interaction
             
+            # Run security check
             composer audit
             
+            # Run PHPUnit tests if available
             if [ -f vendor/bin/phpunit ]; then
               echo "Running PHPUnit tests..."
               phpunit --coverage-clover=coverage.xml --log-junit=test-results.xml
@@ -245,11 +258,12 @@ jobs:
               bin/phpunit --coverage-clover=coverage.xml --log-junit=test-results.xml
             else
               echo "No PHPUnit configuration found"
+              # Basic syntax check
               find src -name "*.php" -exec php -l {} \;
             fi
           else
             echo "No composer.json found for k8s-web-app-php"
-            exit 1
+            exit 1 # Fail if no composer.json
           fi
 
       - name: Upload test results
@@ -278,9 +292,12 @@ jobs:
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: 'fs'
-          scan-ref: ${{ matrix.app == 'k8s-web-app-php' && '.' || format('./apps/{0}', matrix.app) }}
+          scan-ref: './apps/${{ matrix.app }}' # <--- CHANGED THIS BACK TO APPS/ PATH
           format: 'sarif'
           output: 'trivy-results-${{ matrix.app }}.sarif'
+          # Add continue-on-error if you want the job to pass even if Trivy finds issues,
+          # otherwise, it will fail if vulnerabilities are found.
+          # continue-on-error: true 
 
       - name: Upload Trivy scan results
         if: always()
@@ -290,7 +307,7 @@ jobs:
 
   build:
     name: Build and Push Images
-    needs: [detect-changes, test, security-scan]
+    needs: [detect-changes, test, security-scan] # Ensure all quality gates pass
     runs-on: ubuntu-latest
     if: needs.detect-changes.outputs.has_changes == 'true'
     permissions:
@@ -361,8 +378,8 @@ jobs:
         if: matrix.app == 'k8s-web-app-php'
         uses: docker/build-push-action@v5
         with:
-          context: .
-          file: ./docker/php-fpm/Dockerfile
+          context: ./apps/k8s-web-app-php # <--- CHANGED THIS BACK TO APPS/ PATH
+          file: ./apps/k8s-web-app-php/docker/php-fpm/Dockerfile # <--- CHANGED THIS BACK TO APPS/ PATH
           push: true
           tags: |
             ${{ env.REGISTRY }}/k8s-web-app-php/php-fpm:${{ github.sha }}
@@ -376,8 +393,8 @@ jobs:
         if: matrix.app == 'k8s-web-app-php'
         uses: docker/build-push-action@v5
         with:
-          context: .
-          file: ./docker/nginx/Dockerfile
+          context: ./apps/k8s-web-app-php # <--- CHANGED THIS BACK TO APPS/ PATH
+          file: ./apps/k8s-web-app-php/docker/nginx/Dockerfile # <--- CHANGED THIS BACK TO APPS/ PATH
           push: true
           tags: |
             ${{ env.REGISTRY }}/k8s-web-app-php/nginx:${{ github.sha }}
@@ -387,6 +404,7 @@ jobs:
           cache-to: type=gha,mode=max
           platforms: linux/amd64
 
+      # --- Image Scanning for k8s-web-app-php (two images) ---
       - name: Scan Docker image (PHP-FPM)
         if: always() && matrix.app == 'k8s-web-app-php'
         uses: aquasecurity/trivy-action@master
@@ -414,7 +432,9 @@ jobs:
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: 'trivy-image-results-nginx.sarif'
+      # --- End Image Scanning for k8s-web-app-php ---
 
+      # --- Image Scanning for app1 and app2 (single image) ---
       - name: Scan Docker image (${{ matrix.app }})
         if: always() && (matrix.app == 'app1' || matrix.app == 'app2')
         uses: aquasecurity/trivy-action@master
@@ -428,6 +448,7 @@ jobs:
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: 'trivy-image-results-${{ matrix.app }}.sarif'
+      # --- End Image Scanning for app1 and app2 ---
 
       - name: Set app1 output
         if: matrix.app == 'app1'
@@ -552,6 +573,7 @@ jobs:
         run: |
           cd infrastructure-repo
           
+          # Determine source environment for promotion
           case "${{ env.TARGET_ENV }}" in
             "qa")
               SOURCE_ENV="dev"
@@ -573,30 +595,35 @@ jobs:
           
           echo "🚀 Promoting from $SOURCE_ENV (${SOURCE_CLUSTER}) to ${{ env.TARGET_ENV }} (${TARGET_CLUSTER})"
           
+          # Function to promote a single app
           promote_app() {
             local app_name=$1
             echo "📦 Promoting $app_name from $SOURCE_ENV to ${{ env.TARGET_ENV }}"
             
+            # Check if app exists in infrastructure repo
             if [ ! -d "apps/$app_name" ]; then
               echo "⚠️  App $app_name not found in infrastructure repo, skipping"
               return 0
             fi
             
+            # Check if source environment exists
             if [ ! -f "apps/$app_name/overlays/$SOURCE_ENV/kustomization.yaml" ]; then
               echo "⚠️  Source environment $SOURCE_ENV not found for $app_name, skipping"
               return 0
             fi
             
+            # Check if target environment exists
             if [ ! -f "apps/$app_name/overlays/${{ env.TARGET_ENV }}/kustomization.yaml" ]; then
               echo "⚠️  Target environment ${{ env.TARGET_ENV }} not found for $app_name, skipping"
               return 0
             fi
             
+            # Extract current image tags from source environment
             local source_images=""
             if [[ "$app_name" == "k8s-web-app-php" ]]; then
-                source_images=$(grep -A 20 "images:" "apps/$app_name/overlays/$SOURCE_ENV/kustomization.yaml" | grep "newTag:" | sed 's/.*newTag: *//' | head -2)
+                source_images=$(grep -A 20 "images:" "apps/$app_name/overlays/$SOURCE_ENV/kustomization.yaml" | grep "newTag:" | sed 's/.*newTag: *//' | head -2) # Get both tags
             else
-                source_images=$(grep -A 20 "images:" "apps/$app_name/overlays/$SOURCE_ENV/kustomization.yaml" | grep "newTag:" | sed 's/.*newTag: *//' | head -1)
+                source_images=$(grep -A 20 "images:" "apps/$app_name/overlays/$SOURCE_ENV/kustomization.yaml" | grep "newTag:" | sed 's/.*newTag: *//' | head -1) # Get single tag
             fi
 
             if [ -z "$source_images" ]; then
@@ -609,10 +636,13 @@ jobs:
             echo "📋 Found image tags in $SOURCE_ENV:"
             echo "$source_images"
             
+            # Update target environment with source environment's image tags
             echo "🔄 Updating $app_name in ${{ env.TARGET_ENV }} environment"
             cd "apps/$app_name/overlays/${{ env.TARGET_ENV }}"
             
+            # Extract image names and tags from source
             if [[ "$app_name" == "k8s-web-app-php" ]]; then
+                # Assuming the order is php-fpm then nginx
                 read -r php_fpm_tag <<< "$(echo "$source_images" | head -n 1)"
                 read -r nginx_tag <<< "$(echo "$source_images" | tail -n 1)"
 
@@ -627,6 +657,7 @@ jobs:
                     kustomize edit set image "ghcr.io/triplom/k8s-web-app-php/nginx=ghcr.io/triplom/k8s-web-app-php/nginx:$nginx_tag" 2>/dev/null || true
                 fi
             else
+                # For app1 and app2 (single tag)
                 read -r tag <<< "$source_images"
                 if [ -n "$tag" ] && [ "$tag" != "latest" ]; then
                     echo "  📝 Setting image tag: $tag"
@@ -638,10 +669,12 @@ jobs:
             cd - > /dev/null
             echo "✅ Updated $app_name in ${{ env.TARGET_ENV }} environment"
             
+            # Show what was updated
             echo "📄 Updated kustomization.yaml:"
             cat "apps/$app_name/overlays/${{ env.TARGET_ENV }}/kustomization.yaml"
           }
           
+          # Promote selected component(s)
           if [[ "${{ env.COMPONENT }}" == "all" ]]; then
             echo "🔄 Promoting all applications"
             promote_app "app1"
@@ -652,9 +685,11 @@ jobs:
             promote_app "${{ env.COMPONENT }}"
           fi
           
+          # Show what files were changed
           echo "📋 Files changed:"
           git status --porcelain
           
+          # Commit and push changes
           git config --global user.email "actions@github.com"
           git config --global user.name "GitHub Actions"
           git add .
