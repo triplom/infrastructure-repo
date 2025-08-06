@@ -47,6 +47,7 @@ jobs:
       app2_changed: ${{ steps.changes.outputs.app2 }}
       k8s_web_app_php_changed: ${{ steps.changes.outputs.k8s-web-app-php }}
       matrix: ${{ steps.set-matrix.outputs.matrix }}
+      has_changes: ${{ steps.set-matrix.outputs.has_changes }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -68,11 +69,16 @@ jobs:
               - 'docker/**'
               - 'composer.json'
               - 'composer.lock'
+            infrastructure:
+              - 'apps/*/base/**'
+              - 'apps/*/overlays/**'
+              - '.github/workflows/**'
 
       - name: Set build matrix
         id: set-matrix
         run: |
           matrix="[]"
+          has_changes="false"
           
           # For manual dispatch, use the selected component
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
@@ -81,6 +87,7 @@ jobs:
             else
               matrix='["${{ github.event.inputs.component }}"]'
             fi
+            has_changes="true"
           else
             # For push/PR, only build changed components
             apps=()
@@ -96,32 +103,77 @@ jobs:
             
             if [[ ${#apps[@]} -gt 0 ]]; then
               matrix=$(printf '%s\n' "${apps[@]}" | jq -R . | jq -s .)
+              has_changes="true"
             fi
           fi
           
           echo "matrix=$matrix" >> $GITHUB_OUTPUT
+          echo "has_changes=$has_changes" >> $GITHUB_OUTPUT
           echo "Build matrix: $matrix"
+          echo "Has changes: $has_changes"
 
   test:
     name: Test Applications
     runs-on: ubuntu-latest
     needs: detect-changes
-    if: needs.detect-changes.outputs.matrix != '[]'
+    if: needs.detect-changes.outputs.has_changes == 'true'
     strategy:
       matrix:
         app: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
+      fail-fast: false
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Set up Python 3.9
+        if: matrix.app == 'app1' || matrix.app == 'app2'
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+          cache: 'pip'
 
       - name: Test app1
         if: matrix.app == 'app1'
         run: |
           cd apps/app1
+          echo "🧪 Testing app1..."
           if [ -f requirements.txt ]; then
+            pip install --upgrade pip
             pip install -r requirements.txt
-            pip install pytest pytest-cov
-            pytest --cov=./ --cov-report=xml || echo "Tests failed but continuing"
+            pip install pytest pytest-cov flake8
+            
+            # Lint check
+            echo "Running linting..."
+            flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics || true
+            
+            # Run tests if test files exist
+            if find . -name "test_*.py" -o -name "*_test.py" | grep -q .; then
+              echo "Running tests..."
+              pytest --cov=./ --cov-report=xml --cov-report=term-missing || echo "Tests failed but continuing"
+            else
+              echo "No test files found, creating basic test..."
+              # Create a basic test to verify the app starts
+              cat > test_app.py << 'EOF'
+              import pytest
+              from app import app
+
+              @pytest.fixture
+              def client():
+                  app.config['TESTING'] = True
+                  with app.test_client() as client:
+                      yield client
+
+              def test_health_endpoint(client):
+                  """Test health endpoint"""
+                  rv = client.get('/health')
+                  assert rv.status_code == 200
+                  
+              def test_root_endpoint(client):
+                  """Test root endpoint"""
+                  rv = client.get('/')
+                  assert rv.status_code == 200
+              EOF
+              pytest test_app.py || echo "Basic tests failed but continuing"
           else
             echo "No requirements.txt found for app1"
           fi
@@ -130,11 +182,45 @@ jobs:
         if: matrix.app == 'app2'
         run: |
           cd apps/app2
+          echo "🧪 Testing app2..."
           if [ -f requirements.txt ]; then
+            pip install --upgrade pip
             pip install -r requirements.txt
-            pip install pytest pytest-cov
-            pytest --cov=./ --cov-report=xml || echo "Tests failed but continuing"
+            pip install pytest pytest-cov flake8
+            
+            # Lint check
+            echo "Running linting..."
+            flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics || true
+            
+            # Run tests
+            if find . -name "test_*.py" -o -name "*_test.py" | grep -q .; then
+              echo "Running tests..."
+              pytest --cov=./ --cov-report=xml --cov-report=term-missing || echo "Tests failed but continuing"
+            else
+              echo "No test files found, creating basic test..."
+              cat > test_app.py << 'EOF'
+              import pytest
+              from app import app
+
+              @pytest.fixture
+              def client():
+                  app.config['TESTING'] = True
+                  with app.test_client() as client:
+                      yield client
+
+              def test_health_endpoint(client):
+                  """Test health endpoint"""
+                  rv = client.get('/health')
+                  assert rv.status_code == 200
+                  
+              def test_api_data_endpoint(client):
+                  """Test API data endpoint"""
+                  rv = client.get('/api/data')
+                  assert rv.status_code == 200
+              EOF
+              pytest test_app.py || echo "Basic tests failed but continuing"
           elif [ -f package.json ]; then
+            echo "Node.js project detected"
             npm install
             npm test || echo "Tests failed but continuing"
           else
@@ -144,38 +230,86 @@ jobs:
       - name: Test k8s-web-app-php
         if: matrix.app == 'k8s-web-app-php'
         run: |
+          echo "🧪 Testing k8s-web-app-php..."
           if [ -f composer.json ]; then
-            # Install PHP and Composer
+            # Install PHP and required extensions
             sudo apt-get update
-            sudo apt-get install -y php php-cli php-mbstring php-xml php-zip unzip
+            sudo apt-get install -y php8.1 php8.1-cli php8.1-mbstring php8.1-xml php8.1-zip php8.1-curl unzip
             
             # Install Composer
             curl -sS https://getcomposer.org/installer | php
             sudo mv composer.phar /usr/local/bin/composer
             
-            # Install dependencies and run tests
-            composer install --no-dev --optimize-autoloader
+            # Validate composer.json
+            composer validate --strict || echo "Composer validation failed but continuing"
+            
+            # Install dependencies
+            composer install --no-dev --optimize-autoloader --no-interaction
+            
+            # Run security check
+            composer audit || echo "Security audit found issues but continuing"
             
             # Run PHPUnit tests if available
             if [ -f vendor/bin/phpunit ]; then
-              vendor/bin/phpunit || echo "Tests failed but continuing"
+              echo "Running PHPUnit tests..."
+              vendor/bin/phpunit --coverage-text || echo "Tests failed but continuing"
             elif [ -f bin/phpunit ]; then
-              bin/phpunit || echo "Tests failed but continuing"
+              echo "Running PHPUnit tests..."
+              bin/phpunit --coverage-text || echo "Tests failed but continuing"
             else
               echo "No PHPUnit configuration found"
+              # Basic syntax check
+              find src -name "*.php" -exec php -l {} \; || echo "Syntax check failed but continuing"
             fi
           else
             echo "No composer.json found for k8s-web-app-php"
           fi
 
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.app }}
+          path: |
+            **/coverage.xml
+            **/test-results.xml
+          retention-days: 7
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.has_changes == 'true'
+    strategy:
+      matrix:
+        app: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: './apps/${{ matrix.app }}'
+          format: 'sarif'
+          output: 'trivy-results-${{ matrix.app }}.sarif'
+
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: 'trivy-results-${{ matrix.app }}.sarif'
+
   build:
     name: Build and Push Images
-    needs: [detect-changes, test]
+    needs: [detect-changes, test, security-scan]
     runs-on: ubuntu-latest
-    if: needs.detect-changes.outputs.matrix != '[]'
+    if: needs.detect-changes.outputs.has_changes == 'true'
     permissions:
       contents: read
       packages: write
+      security-events: write
     strategy:
       matrix:
         app: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
@@ -197,6 +331,17 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ matrix.app }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
       - name: Build and push app1
         if: matrix.app == 'app1'
         uses: docker/build-push-action@v5
@@ -206,8 +351,10 @@ jobs:
           tags: |
             ${{ env.REGISTRY }}/app1:${{ github.sha }}
             ${{ env.REGISTRY }}/app1:latest
+          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          platforms: linux/amd64
 
       - name: Build and push app2
         if: matrix.app == 'app2'
@@ -218,8 +365,10 @@ jobs:
           tags: |
             ${{ env.REGISTRY }}/app2:${{ github.sha }}
             ${{ env.REGISTRY }}/app2:latest
+          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          platforms: linux/amd64
 
       - name: Build and push k8s-web-app-php (PHP-FPM)
         if: matrix.app == 'k8s-web-app-php'
@@ -231,8 +380,10 @@ jobs:
           tags: |
             ${{ env.REGISTRY }}/k8s-web-app-php/php-fpm:${{ github.sha }}
             ${{ env.REGISTRY }}/k8s-web-app-php/php-fpm:latest
+          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          platforms: linux/amd64
 
       - name: Build and push k8s-web-app-php (Nginx)
         if: matrix.app == 'k8s-web-app-php'
@@ -244,8 +395,24 @@ jobs:
           tags: |
             ${{ env.REGISTRY }}/k8s-web-app-php/nginx:${{ github.sha }}
             ${{ env.REGISTRY }}/k8s-web-app-php/nginx:latest
+          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          platforms: linux/amd64
+
+      - name: Scan Docker images
+        if: always()
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ matrix.app }}:${{ github.sha }}
+          format: 'sarif'
+          output: 'trivy-image-results-${{ matrix.app }}.sarif'
+
+      - name: Upload image scan results
+        if: always()
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: 'trivy-image-results-${{ matrix.app }}.sarif'
 
       - name: Set app1 output
         if: matrix.app == 'app1'
@@ -267,7 +434,7 @@ jobs:
     needs: [detect-changes, build]
     runs-on: ubuntu-latest
     if: |
-      needs.detect-changes.outputs.matrix != '[]' && 
+      needs.detect-changes.outputs.has_changes == 'true' && 
       (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch') &&
       (github.event.inputs.action != 'promote' || github.event.inputs.action == '')
     strategy:
@@ -276,6 +443,17 @@ jobs:
     env:
       ENVIRONMENT: ${{ github.event.inputs.environment || 'dev' }}
     steps:
+      - name: Wait for image availability
+        run: |
+          echo "⏳ Waiting for image to be available in registry..."
+          sleep 30
+          
+          # Verify image exists
+          if ! docker manifest inspect ${{ env.REGISTRY }}/${{ matrix.app }}:${{ github.sha }} >/dev/null 2>&1; then
+            echo "::warning::Image not immediately available, waiting longer..."
+            sleep 60
+          fi
+
       - name: Trigger deployment for app1
         if: matrix.app == 'app1'
         uses: peter-evans/repository-dispatch@v2
@@ -290,9 +468,11 @@ jobs:
               "ref": "${{ github.ref }}",
               "version": "${{ github.sha }}",
               "environment": "${{ env.ENVIRONMENT }}",
+              "cluster": "kind-${{ env.ENVIRONMENT }}-cluster",
               "triggered_by": "${{ github.actor }}",
               "commit_sha": "${{ github.sha }}",
-              "workflow_run_id": "${{ github.run_id }}"
+              "workflow_run_id": "${{ github.run_id }}",
+              "image_tag": "${{ github.sha }}"
             }
 
       - name: Trigger deployment for app2
@@ -309,9 +489,11 @@ jobs:
               "ref": "${{ github.ref }}",
               "version": "${{ github.sha }}",
               "environment": "${{ env.ENVIRONMENT }}",
+              "cluster": "kind-${{ env.ENVIRONMENT }}-cluster",
               "triggered_by": "${{ github.actor }}",
               "commit_sha": "${{ github.sha }}",
-              "workflow_run_id": "${{ github.run_id }}"
+              "workflow_run_id": "${{ github.run_id }}",
+              "image_tag": "${{ github.sha }}"
             }
 
       - name: Trigger deployment for k8s-web-app-php
@@ -328,9 +510,11 @@ jobs:
               "ref": "${{ github.ref }}",
               "version": "${{ github.sha }}",
               "environment": "${{ env.ENVIRONMENT }}",
+              "cluster": "kind-${{ env.ENVIRONMENT }}-cluster",
               "triggered_by": "${{ github.actor }}",
               "commit_sha": "${{ github.sha }}",
-              "workflow_run_id": "${{ github.run_id }}"
+              "workflow_run_id": "${{ github.run_id }}",
+              "image_tag": "${{ github.sha }}"
             }
 
   promote:
@@ -349,6 +533,11 @@ jobs:
           repository: triplom/infrastructure-repo
           token: ${{ secrets.INFRA_REPO_PAT }}
           path: infrastructure-repo
+
+      - name: Install kustomize
+        run: |
+          curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+          sudo mv kustomize /usr/local/bin/
 
       - name: Promote applications
         run: |
@@ -497,18 +686,70 @@ jobs:
     name: Send Notifications
     needs: [detect-changes, build, deploy, promote]
     runs-on: ubuntu-latest
-    if: always() && needs.detect-changes.outputs.matrix != '[]'
+    if: always() && needs.detect-changes.outputs.has_changes == 'true'
     steps:
       - name: Notify deployment status
         run: |
+          # Determine overall status
+          OVERALL_STATUS="success"
+          if [[ "${{ needs.build.result }}" == "failure" || "${{ needs.deploy.result }}" == "failure" || "${{ needs.promote.result }}" == "failure" ]]; then
+            OVERALL_STATUS="failure"
+          elif [[ "${{ needs.build.result }}" == "cancelled" || "${{ needs.deploy.result }}" == "cancelled" || "${{ needs.promote.result }}" == "cancelled" ]]; then
+            OVERALL_STATUS="cancelled"
+          fi
+          
           if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ github.event.inputs.action }}" == "promote" ]]; then
+            # Determine cluster names for promotion
+            case "${{ github.event.inputs.environment }}" in
+              "qa")
+                SOURCE_CLUSTER="kind-dev-cluster"
+                TARGET_CLUSTER="kind-qa-cluster"
+                ;;
+              "prod")
+                SOURCE_CLUSTER="kind-qa-cluster"
+                TARGET_CLUSTER="kind-prod-cluster"
+                ;;
+            esac
+            
             echo "🚀 Promotion workflow completed"
             echo "• Component: ${{ github.event.inputs.component }}"
-            echo "• Target Environment: ${{ github.event.inputs.environment }}"
-            echo "• Status: ${{ job.status }}"
+            echo "• Source: ${SOURCE_CLUSTER}"
+            echo "• Target: ${TARGET_CLUSTER}"
+            echo "• Status: ${OVERALL_STATUS}"
+            echo "• Triggered by: ${{ github.actor }}"
           else
             echo "🏗️  Build and deployment workflow completed"
             echo "• Components: ${{ needs.detect-changes.outputs.matrix }}"
             echo "• Environment: ${{ github.event.inputs.environment || 'dev' }}"
-            echo "• Status: ${{ job.status }}"
+            echo "• Cluster: kind-${{ github.event.inputs.environment || 'dev' }}-cluster"
+            echo "• Status: ${OVERALL_STATUS}"
+            echo "• Triggered by: ${{ github.actor }}"
           fi
+          
+          # Set step output for potential use in other integrations
+          echo "status=${OVERALL_STATUS}" >> $GITHUB_OUTPUT
+
+      - name: Create deployment summary
+        if: always()
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << 'EOF'
+          ## 🚀 CI/CD Pipeline Summary
+          
+          ### Components Processed
+          ${{ needs.detect-changes.outputs.matrix }}
+          
+          ### Job Results
+          | Job | Status |
+          |-----|--------|
+          | Detect Changes | ${{ needs.detect-changes.result }} |
+          | Test | ${{ needs.test.result }} |
+          | Build | ${{ needs.build.result }} |
+          | Deploy | ${{ needs.deploy.result }} |
+          | Promote | ${{ needs.promote.result }} |
+          
+          ### Environment
+          - **Target Environment**: ${{ github.event.inputs.environment || 'dev' }}
+          - **Action**: ${{ github.event.inputs.action || 'deploy' }}
+          - **Triggered by**: ${{ github.actor }}
+          - **Commit**: ${{ github.sha }}
+          EOF
