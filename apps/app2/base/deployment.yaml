@@ -12,11 +12,16 @@ spec:
       labels:
         app: app2
     spec:
+      imagePullSecrets:
+          - name: github-registry-secret
       containers:
       - name: app2
         image: ghcr.io/triplom/app2:latest
         ports:
-        - containerPort: 8080
+        - containerPort: 8001
+          name: http
+        - containerPort: 9090
+          name: metrics
         env:
         - name: CONFIG_PATH
           value: "/config/config.yaml"
@@ -34,5 +39,3 @@ spec:
       - name: config-volume
         configMap:
           name: app2-config
-      imagePullSecrets:
-      - name: github-registry-secret

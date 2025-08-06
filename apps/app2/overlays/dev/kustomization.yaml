@@ -7,6 +7,11 @@ resources:
 - ../../base
 - ingress.yaml
 
+images:
+- name: ghcr.io/triplom/app2
+  newName: ghcr.io/triplom/app2
+  newTag: latest
+  
 patchesStrategicMerge:
 - patches.yaml
 
