@@ -1,4 +1,6 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-# The deploy.sh script will be used to install ingress-nginx via Helm
+resources:
+- ../../base
+
