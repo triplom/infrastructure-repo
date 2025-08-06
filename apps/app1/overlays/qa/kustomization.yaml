@@ -7,21 +7,18 @@ resources:
 namespace: app1-qa
 
 patches:
-- path: patches.yaml
-  target:
+- target:
     kind: Deployment
     name: app1
+  patch: |-
+    - op: replace
+      path: /spec/template/spec/imagePullSecrets
+      value:
+      - name: github-registry-secret
 
 configMapGenerator:
 - name: app1-config
   behavior: merge
   literals:
   - ENVIRONMENT=qa
-  - LOG_LEVEL=INFO
-
-# Add this section to pull the GitHub Container Registry secret
-secretGenerator:
-- name: github-registry-secret
-  namespace: app1-qa
-  type: kubernetes.io/dockerconfigjson
-  behavior: replace
+  - LOG_LEVEL=DEBUG
