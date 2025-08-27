@@ -9,8 +9,6 @@ spec:
     app: app1
   ports:
   - port: 80
-    targetPort: 8080
-    name: http
-  - port: 9090
-    targetPort: 9090
-    name: metrics
+    targetPort: 8000
+    protocol: TCP
+  type: ClusterIP

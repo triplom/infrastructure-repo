@@ -1,8 +1,0 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: app2-config
-data:
-  config.yaml: |
-    app_name: app2
-    log_level: info

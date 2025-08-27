@@ -1,0 +1,23 @@
+# QA-specific overrides for kube-prometheus-stack
+prometheus:
+  prometheusSpec:
+    retention: 15d
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          resources:
+            requests:
+              storage: 20Gi
+
+grafana:
+  persistence:
+    size: 8Gi
+
+# QA resources
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 200m
+    memory: 256Mi

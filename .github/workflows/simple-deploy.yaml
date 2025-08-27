@@ -1,0 +1,43 @@
+name: Simple Deployment Handler
+
+on:
+  repository_dispatch:
+    types: [simple-deployment]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      APP: ${{ github.event.client_payload.app }}
+      ENVIRONMENT: ${{ github.event.client_payload.environment }}
+      IMAGE_TAG: ${{ github.event.client_payload.image_tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Update app image
+        run: |
+          cd apps/${{ env.APP }}
+          
+          # Update kustomization.yaml with new image tag
+          sed -i "s/newTag: .*/newTag: ${{ env.IMAGE_TAG }}/" kustomization.yaml
+          
+          # Update environment-specific values if needed
+          if [ -f overlays/${{ env.ENVIRONMENT }}/kustomization.yaml ]; then
+            cd overlays/${{ env.ENVIRONMENT }}
+            sed -i "s/newTag: .*/newTag: ${{ env.IMAGE_TAG }}/" kustomization.yaml
+          fi
+
+      - name: Commit changes
+        run: |
+          git config --global user.email "actions@github.com"
+          git config --global user.name "GitHub Actions"
+          git add .
+          git commit -m "🚀 Deploy ${{ env.APP }} to ${{ env.ENVIRONMENT }} (tag: ${{ env.IMAGE_TAG }})" || echo "No changes to commit"
+          git push
+
+      - name: Deploy to cluster
+        run: |
+          echo "🚀 Deploying ${{ env.APP }} to ${{ env.ENVIRONMENT }} environment"
+          # In a real scenario, this would apply the manifests to the cluster
+          # kubectl apply -k apps/${{ env.APP }}/overlays/${{ env.ENVIRONMENT }}

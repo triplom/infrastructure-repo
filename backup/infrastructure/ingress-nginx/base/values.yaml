@@ -1,0 +1,14 @@
+# infrastructure-repo/infrastructure/ingress-nginx/base/values.yaml
+controller:
+  replicaCount: 2
+  service:
+    annotations:
+      service.beta.kubernetes.io/azure-load-balancer-health-probe-request-path: /healthz
+  config:
+    use-forwarded-headers: "true"
+  metrics:
+    enabled: true
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 5
