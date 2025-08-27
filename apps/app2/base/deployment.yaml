@@ -3,7 +3,7 @@ kind: Deployment
 metadata:
   name: app2
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: app2
@@ -12,30 +12,30 @@ spec:
       labels:
         app: app2
     spec:
-      imagePullSecrets:
-          - name: github-registry-secret
       containers:
       - name: app2
         image: ghcr.io/triplom/app2:latest
         ports:
-        - containerPort: 8001
-          name: http
-        - containerPort: 9090
-          name: metrics
+        - containerPort: 8000
         env:
-        - name: CONFIG_PATH
-          value: "/config/config.yaml"
-        volumeMounts:
-        - name: config-volume
-          mountPath: /config
+        - name: ENV
+          value: "dev"
         resources:
-          limits:
-            cpu: "500m"
-            memory: "512Mi"
           requests:
-            cpu: "100m"
+            memory: "64Mi"
+            cpu: "50m"
+          limits:
             memory: "128Mi"
-      volumes:
-      - name: config-volume
-        configMap:
-          name: app2-config
+            cpu: "100m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 5

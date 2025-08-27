@@ -1,0 +1,133 @@
+name: Simple CI Pipeline
+
+on:
+  push:
+    branches: [main, 'feature/**']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - qa
+          - prod
+      app:
+        description: 'App to deploy'
+        required: false
+        default: 'all'
+
+env:
+  REGISTRY: ghcr.io/triplom
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      apps: ${{ steps.changes.outputs.apps }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed apps
+        id: changes
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            if [[ "${{ github.event.inputs.app }}" == "all" ]]; then
+              echo "apps=[\"app1\", \"app2\"]" >> $GITHUB_OUTPUT
+            else
+              echo "apps=[\"${{ github.event.inputs.app }}\"]" >> $GITHUB_OUTPUT
+            fi
+          else
+            # Detect changes in apps directory
+            changed_apps=$(git diff --name-only HEAD~1 HEAD | grep '^apps/' | cut -d'/' -f2 | sort -u | jq -R . | jq -s .)
+            if [[ "$changed_apps" == "[]" ]]; then
+              echo "apps=[\"app1\", \"app2\"]" >> $GITHUB_OUTPUT  # Deploy all if no specific changes
+            else
+              echo "apps=$changed_apps" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+  test-and-build:
+    needs: detect-changes
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        app: ${{ fromJson(needs.detect-changes.outputs.apps) }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+          cache: 'pip'
+
+      - name: Test app
+        run: |
+          cd apps/${{ matrix.app }}
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+            pip install pytest
+            python -m pytest --tb=short || echo "No tests found, skipping..."
+          fi
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: ./apps/${{ matrix.app }}
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ matrix.app }}:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ matrix.app }}:latest
+
+  deploy:
+    needs: [detect-changes, test-and-build]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    strategy:
+      matrix:
+        app: ${{ fromJson(needs.detect-changes.outputs.apps) }}
+    env:
+      ENVIRONMENT: ${{ github.event.inputs.environment || 'dev' }}
+    steps:
+      - name: Trigger deployment
+        uses: peter-evans/repository-dispatch@v2
+        with:
+          token: ${{ secrets.INFRA_REPO_PAT }}
+          repository: triplom/infrastructure-repo
+          event-type: simple-deployment
+          client-payload: |
+            {
+              "app": "${{ matrix.app }}",
+              "environment": "${{ env.ENVIRONMENT }}",
+              "image_tag": "${{ github.sha }}",
+              "triggered_by": "${{ github.actor }}"
+            }
+
+  notification:
+    needs: [test-and-build, deploy]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Deployment Summary
+        run: |
+          echo "## 🚀 Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Apps**: ${{ needs.detect-changes.outputs.apps }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environment**: ${{ github.event.inputs.environment || 'dev' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status**: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY

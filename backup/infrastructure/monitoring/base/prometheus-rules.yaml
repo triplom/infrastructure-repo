@@ -1,0 +1,56 @@
+# infrastructure-repo/infrastructure/monitoring/base/prometheus-rules.yaml
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: gitops-app-alerts
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+  - name: gitops-application-rules
+    rules:
+    - alert: ApplicationDown
+      expr: up{app="gitops-app"} == 0
+      for: 5m
+      labels:
+        severity: critical
+      annotations:
+        summary: "Application instance is down"
+        description: "Application instance {{ $labels.instance }} of {{ $labels.job }} has been down for more than 5 minutes."
+    
+    - alert: HighLatency
+      expr: histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{app="gitops-app"}[5m])) by (le)) > 2
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        summary: "High request latency detected"
+        description: "95th percentile latency is above 2 seconds for application over 10 minutes."
+    
+    - alert: PodRestartingFrequently
+      expr: increase(kube_pod_container_status_restarts_total{namespace=~"app1-.*"}[1h]) > 5
+      for: 15m
+      labels:
+        severity: warning
+      annotations:
+        summary: "Pod restarting frequently"
+        description: "Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} has restarted more than 5 times in the last hour."
+    
+    - alert: HighCPUUsage
+      expr: sum(rate(container_cpu_usage_seconds_total{namespace=~"app1-.*"}[5m])) by (pod, namespace) > 0.8
+      for: 15m
+      labels:
+        severity: warning
+      annotations:
+        summary: "High CPU usage detected"
+        description: "Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} has high CPU usage for more than 15 minutes."
+    
+    - alert: HighMemoryUsage
+      expr: sum(container_memory_usage_bytes{namespace=~"app1-.*"}) by (pod, namespace) / sum(container_spec_memory_limit_bytes{namespace=~"app1-.*"}) by (pod, namespace) > 0.8
+      for: 15m
+      labels:
+        severity: warning
+      annotations:
+        summary: "High memory usage detected"
+        description: "Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} is using more than 80% of its memory limit for more than 15 minutes."

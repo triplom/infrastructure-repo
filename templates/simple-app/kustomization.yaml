@@ -5,12 +5,12 @@ resources:
 - deployment.yaml
 - service.yaml
 
-namespace: app2
+namespace: app1
 
 images:
-- name: ghcr.io/triplom/app2
+- name: ghcr.io/triplom/app1
   newTag: latest
 
 commonLabels:
-  app: app2
+  app: app1
   component: web

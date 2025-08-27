@@ -1,0 +1,36 @@
+# infrastructure-repo/infrastructure/monitoring/overlays/prod/values-patch.yaml
+# Production-specific overrides for kube-prometheus-stack
+prometheus:
+  prometheusSpec:
+    replicas: 2
+    retention: 30d
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          resources:
+            requests:
+              storage: 20Gi
+
+alertmanager:
+  alertmanagerSpec:
+    replicas: 2
+    storage:
+      volumeClaimTemplate:
+        spec:
+          resources:
+            requests:
+              storage: 10Gi
+
+grafana:
+  replicas: 2
+  persistence:
+    size: 10Gi
+
+# Production resources
+resources:
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+  requests:
+    cpu: 500m
+    memory: 512Mi
