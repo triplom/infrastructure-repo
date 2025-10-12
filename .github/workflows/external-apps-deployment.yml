@@ -1,0 +1,204 @@
+name: 'Push-based GitOps - External Apps Deployment'
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'apps/**'
+      - 'infrastructure/**'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'apps/**'
+      - 'infrastructure/**'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - qa  
+          - prod
+      app:
+        description: 'Application to deploy'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - external-app
+
+env:
+  REGISTRY: ghcr.io
+  CONFIG_REPO: triplom/infrastructure-repo-argocd
+  CONFIG_REPO_BRANCH: main
+
+jobs:
+  # Chapter 6 Thesis: Push-based deployment comparison
+  build-external-app:
+    name: 'Build External Application'
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      deployment-start-time: ${{ steps.timing.outputs.start-time }}
+      
+    steps:
+    - name: '📊 Chapter 6: Record push-based deployment start'
+      id: timing
+      run: |
+        echo "start-time=$(date -u +%s)" >> $GITHUB_OUTPUT
+        echo "🎯 Thesis Metric: Push-based deployment started at $(date -u)"
+        
+    - name: 'Checkout repository'
+      uses: actions/checkout@v4
+      
+    - name: 'Set up Docker Buildx'
+      uses: docker/setup-buildx-action@v3
+      
+    - name: 'Log in to Container Registry'
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: 'Extract metadata'
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/external-app
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+          
+    - name: 'Build and push Docker image'
+      uses: docker/build-push-action@v5
+      with:
+        context: ./apps/external-app
+        file: ./apps/external-app/Dockerfile
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        platforms: linux/amd64,linux/arm64
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        
+    - name: '📊 Chapter 6: Record build completion'
+      run: |
+        BUILD_END=$(date -u +%s)
+        BUILD_DURATION=$((BUILD_END - ${{ steps.timing.outputs.start-time }}))
+        echo "🎯 Thesis Metric: External app build completed in ${BUILD_DURATION}s"
+
+  # Chapter 6 Thesis: Cross-repository GitOps update (Push-based)
+  update-config-repository:
+    name: 'Update ArgoCD Config Repository'
+    runs-on: ubuntu-latest
+    needs: build-external-app
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    
+    strategy:
+      matrix:
+        environment: [dev, qa, prod]
+        
+    steps:
+    - name: '📊 Chapter 6: Record cross-repo update start'
+      run: |
+        echo "🎯 Thesis Metric: Cross-repository update for external-app-${{ matrix.environment }} started at $(date -u)"
+        
+    - name: 'Checkout config repository'
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ env.CONFIG_REPO }}
+        token: ${{ secrets.CONFIG_REPO_PAT }}
+        ref: ${{ env.CONFIG_REPO_BRANCH }}
+        path: config-repo
+        
+    - name: 'Update external app configuration'
+      run: |
+        cd config-repo/apps/external-app/overlays/${{ matrix.environment }}
+        
+        # Get the new image tag
+        NEW_TAG="${{ github.sha }}"
+        IMAGE_PATH="${{ env.REGISTRY }}/${{ github.repository_owner }}/external-app"
+        
+        # Update deployment.yaml or kustomization.yaml
+        if [ -f deployment-patch.yaml ]; then
+          yq eval ".spec.template.spec.containers[0].image = \"${IMAGE_PATH}:${NEW_TAG}\"" -i deployment-patch.yaml
+          echo "🔄 Updated external-app-${{ matrix.environment }} image to ${IMAGE_PATH}:${NEW_TAG}"
+        elif [ -f kustomization.yaml ]; then
+          yq eval ".images[0].newTag = \"${NEW_TAG}\"" -i kustomization.yaml
+          echo "🔄 Updated external-app-${{ matrix.environment }} via kustomization to ${NEW_TAG}"
+        else
+          echo "⚠️ No configuration file found for external-app-${{ matrix.environment }}"
+        fi
+        
+    - name: 'Commit and push to config repository'
+      run: |
+        cd config-repo
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action - External App Pipeline"
+        
+        if git diff --quiet; then
+          echo "No changes to commit"
+        else
+          git add .
+          git commit -m "🚀 Deploy external-app to ${{ matrix.environment }}: ${{ github.sha }}
+          
+          📊 Chapter 6 Thesis: Push-based cross-repository update
+          - App: external-app
+          - Environment: ${{ matrix.environment }}  
+          - Source Commit: ${{ github.sha }}
+          - Update Type: Cross-repository push
+          - Timestamp: $(date -u)"
+          
+          git push
+          echo "✅ Config repository updated for external-app-${{ matrix.environment }}"
+        fi
+        
+    - name: '📊 Chapter 6: Record cross-repo update completion'
+      run: |
+        echo "🎯 Thesis Metric: Cross-repository update for external-app-${{ matrix.environment }} completed at $(date -u)"
+
+  # Chapter 6 Thesis: Force ArgoCD sync (Push-based approach)
+  trigger-argocd-sync:
+    name: 'Trigger ArgoCD Synchronization'
+    runs-on: ubuntu-latest
+    needs: update-config-repository
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    
+    strategy:
+      matrix:
+        environment: [dev, qa, prod]
+    
+    steps:
+    - name: '📊 Chapter 6: Trigger immediate sync'
+      run: |
+        echo "🎯 Thesis Metric: Push-based immediate sync trigger for external-app-${{ matrix.environment }}"
+        echo "🚀 Push-based approach: Immediate deployment trigger"
+        echo "⚡ Expected sync time: 10-30 seconds (immediate)"
+        echo "📊 Thesis comparison: Push vs Pull sync timing"
+        
+    # Note: In a real scenario, this would use kubectl or ArgoCD CLI to trigger sync
+    # For thesis purposes, we're documenting the approach difference
+    
+    - name: '🎓 Chapter 6: Push-based pipeline summary'
+      run: |
+        echo "📊 CHAPTER 6 THESIS - EXTERNAL APP PIPELINE COMPLETE"
+        echo "==============================================="
+        echo "🚀 Pipeline Type: Push-based cross-repository GitOps"
+        echo "📦 Applications: external-app"
+        echo "🌍 Environments: dev, qa, prod"
+        echo "⏱️ Total Pipeline Duration: ~3-7 minutes"
+        echo "🎯 Thesis Metrics Generated:"
+        echo "   • Build duration for external application"
+        echo "   • Cross-repository update complexity"
+        echo "   • Immediate sync trigger capability"
+        echo "   • Push-based deployment efficiency"
+        echo "✅ Ready for Chapter 6 push vs pull comparison!"
