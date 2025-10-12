@@ -9,6 +9,13 @@
 *.crt
 *.env
 
+# Repository Secrets & Configuration Files with Credentials
+repositories/github-repo.yaml
+**/secret*.yaml
+**/secrets*.yaml  
+**/*token*.yaml
+**/*credential*.yaml
+
 # Development tools
 .vscode/*
 !.vscode/extensions.json
