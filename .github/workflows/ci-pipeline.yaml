@@ -5,7 +5,8 @@ on:
     branches:
       - main
     paths:
-      - 'apps/external-app/**'
+      - 'apps/app1/**'
+      - 'apps/app2/**'
       - '.github/workflows/ci-pipeline.yaml'
   workflow_dispatch:
     inputs:
@@ -18,10 +19,17 @@ on:
           - dev
           - qa
           - prod
+      component:
+        description: 'Component to build and deploy'
+        required: true
+        default: 'app1'
+        type: choice
+        options:
+          - app1
+          - app2
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/external-app
 
 permissions:
   contents: read
@@ -29,9 +37,53 @@ permissions:
   id-token: write
 
 jobs:
-  build:
-    name: Build and Push External App
+  determine-changes:
+    name: Determine Changed Components
     runs-on: ubuntu-latest
+    outputs:
+      changed-apps: ${{ steps.changes.outputs.changed-apps }}
+      deploy-component: ${{ steps.component.outputs.deploy-component }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Detect changed applications
+        id: changes
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "changed-apps=[\"${{ github.event.inputs.component }}\"]" >> $GITHUB_OUTPUT
+          else
+            # Auto-detect changes in push events
+            CHANGED_APPS=""
+            if git diff --name-only HEAD^ HEAD | grep -q "^apps/app1/"; then
+              CHANGED_APPS="$CHANGED_APPS,\"app1\""
+            fi
+            if git diff --name-only HEAD^ HEAD | grep -q "^apps/app2/"; then
+              CHANGED_APPS="$CHANGED_APPS,\"app2\""
+            fi
+            CHANGED_APPS="[${CHANGED_APPS#,}]"
+            echo "changed-apps=$CHANGED_APPS" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set deployment component
+        id: component
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "deploy-component=${{ github.event.inputs.component }}" >> $GITHUB_OUTPUT
+          else
+            # For push events, use app1 as default
+            echo "deploy-component=app1" >> $GITHUB_OUTPUT
+          fi
+
+  build:
+    name: Build and Push Application
+    runs-on: ubuntu-latest
+    needs: determine-changes
+    strategy:
+      matrix:
+        app: ["app1"]
+    outputs:
+      image-tag: ${{ steps.image-tag.outputs.image-tag }}
     
     steps:
       - name: Checkout Repository
@@ -51,7 +103,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.app }}
           tags: |
             type=ref,event=branch
             type=ref,event=pr
@@ -61,73 +113,65 @@ jobs:
       - name: Build and push container image
         uses: docker/build-push-action@v5
         with:
-          context: ./apps/external-app
+          context: ./apps/${{ matrix.app }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.app }}:latest
           cache-to: type=inline
       
       - name: Set image tag output
         id: image-tag
         run: |
           IMAGE_TAG=$(echo "${{ steps.meta.outputs.tags }}" | head -1)
-          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_OUTPUT
+          echo "image-tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+          echo "Built and tagged: $IMAGE_TAG"
 
-  update-config:
-    needs: build
+  deploy:
+    name: Push-Based Deployment
+    needs: [determine-changes, build]
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     env:
       ENVIRONMENT: ${{ github.event.inputs.environment || 'dev' }}
+      COMPONENT: ${{ needs.determine-changes.outputs.deploy-component }}
     
     steps:
       - name: Checkout
         uses: actions/checkout@v4
       
-      - name: Update application configuration in ArgoCD config repo
-        env:
-          CONFIG_REPO_PAT: ${{ secrets.CONFIG_REPO_PAT }}
+      - name: Update application configuration locally
         run: |
-          # Clone the ArgoCD configuration repository
-          git clone https://${{ github.actor }}:$CONFIG_REPO_PAT@github.com/triplom/infrastructure-repo-argocd.git
-          cd infrastructure-repo-argocd
-          
-          # Configure git
+          # Configure git for local updates
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
           
-          # Update the image tag in the deployment
-          IMAGE_TAG="${{ needs.build.outputs.image_tag }}"
+          IMAGE_TAG="${{ needs.build.outputs.image-tag }}"
+          echo "Updating $COMPONENT with image: $IMAGE_TAG"
           
-          # Update external-app deployment
-          if [[ -f "apps/external-app/base/deployment.yaml" ]]; then
-            sed -i "s|image: ghcr.io/triplom/external-app:.*|image: $IMAGE_TAG|g" apps/external-app/base/deployment.yaml
-            git add apps/external-app/base/deployment.yaml
+          # Update the image tag in the deployment
+          DEPLOYMENT_FILE="apps/${COMPONENT}/base/deployment.yaml"
+          if [[ -f "$DEPLOYMENT_FILE" ]]; then
+            sed -i "s|image: ghcr.io/.*/.*:.*|image: $IMAGE_TAG|g" "$DEPLOYMENT_FILE"
             
-            if git diff --staged --quiet; then
-              echo "No changes to commit"
+            if git diff --quiet; then
+              echo "No changes detected in $DEPLOYMENT_FILE"
             else
-              git commit -m "Update external-app image to $IMAGE_TAG"
+              git add "$DEPLOYMENT_FILE"
+              git commit -m "Update $COMPONENT image to $IMAGE_TAG [skip ci]"
               git push origin main
-              echo "Updated external-app configuration with new image: $IMAGE_TAG"
+              echo "Updated $COMPONENT configuration with new image: $IMAGE_TAG"
             fi
           else
-            echo "External-app deployment.yaml not found, creating placeholder"
-            mkdir -p apps/external-app/base
-            cat > apps/external-app/base/deployment.yaml <<EOL
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: external-app-deployment
-spec:
-  template:
-    spec:
-      containers:
-      - name: external-app
-        image: $IMAGE_TAG
-EOL
-            git add apps/external-app/
-            git commit -m "Add external-app configuration with image: $IMAGE_TAG"
-            git push origin main
+            echo "Deployment file not found: $DEPLOYMENT_FILE"
+            exit 1
           fi
+
+      - name: Deploy using kubectl (Simulated)
+        run: |
+          echo "🚀 Push-Based Deployment Simulation"
+          echo "Environment: $ENVIRONMENT"
+          echo "Component: $COMPONENT"
+          echo "Image: ${{ needs.build.outputs.image-tag }}"
+          echo "Target cluster: kind-${ENVIRONMENT}-cluster"
+          echo "✅ Push-based deployment completed successfully"
