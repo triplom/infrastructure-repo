@@ -29,7 +29,8 @@ on:
         type: choice
         options:
           - all
-          - external-app
+          - app1
+          - app2
 
 env:
   REGISTRY: ghcr.io
@@ -39,9 +40,13 @@ env:
 jobs:
   # Chapter 6 Thesis: Push-based deployment comparison
   build-external-app:
-    name: 'Build External Application'
+    name: 'Build External Applications'
     runs-on: ubuntu-latest
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    
+    strategy:
+      matrix:
+        app: [app1, app2]
     
     outputs:
       image-tag: ${{ steps.meta.outputs.tags }}
@@ -52,7 +57,7 @@ jobs:
       id: timing
       run: |
         echo "start-time=$(date -u +%s)" >> $GITHUB_OUTPUT
-        echo "🎯 Thesis Metric: Push-based deployment started at $(date -u)"
+        echo "🎯 Thesis Metric: Push-based ${{ matrix.app }} deployment started at $(date -u)"
         
     - name: 'Checkout repository'
       uses: actions/checkout@v4
@@ -71,7 +76,7 @@ jobs:
       id: meta
       uses: docker/metadata-action@v5
       with:
-        images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/external-app
+        images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.app }}
         tags: |
           type=ref,event=branch
           type=ref,event=pr
@@ -81,8 +86,8 @@ jobs:
     - name: 'Build and push Docker image'
       uses: docker/build-push-action@v5
       with:
-        context: ./apps/external-app
-        file: ./apps/external-app/Dockerfile
+        context: ./apps/${{ matrix.app }}
+        file: ./apps/${{ matrix.app }}/Dockerfile
         push: true
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
@@ -94,7 +99,7 @@ jobs:
       run: |
         BUILD_END=$(date -u +%s)
         BUILD_DURATION=$((BUILD_END - ${{ steps.timing.outputs.start-time }}))
-        echo "🎯 Thesis Metric: External app build completed in ${BUILD_DURATION}s"
+        echo "🎯 Thesis Metric: ${{ matrix.app }} build completed in ${BUILD_DURATION}s"
 
   # Chapter 6 Thesis: Cross-repository GitOps update (Push-based)
   update-config-repository:
@@ -106,37 +111,38 @@ jobs:
     strategy:
       matrix:
         environment: [dev, qa, prod]
+        app: [app1, app2]
         
     steps:
     - name: '📊 Chapter 6: Record cross-repo update start'
       run: |
-        echo "🎯 Thesis Metric: Cross-repository update for external-app-${{ matrix.environment }} started at $(date -u)"
+        echo "🎯 Thesis Metric: Cross-repository update for ${{ matrix.app }}-${{ matrix.environment }} started at $(date -u)"
         
     - name: 'Checkout config repository'
       uses: actions/checkout@v4
       with:
         repository: ${{ env.CONFIG_REPO }}
-        token: ${{ secrets.CONFIG_REPO_PAT }}
+        token: ${{ secrets.GITHUB_TOKEN }}
         ref: ${{ env.CONFIG_REPO_BRANCH }}
         path: config-repo
         
-    - name: 'Update external app configuration'
+    - name: 'Update app configuration'
       run: |
-        cd config-repo/apps/external-app/overlays/${{ matrix.environment }}
+        cd config-repo/apps/${{ matrix.app }}/overlays/${{ matrix.environment }}
         
         # Get the new image tag
         NEW_TAG="${{ github.sha }}"
-        IMAGE_PATH="${{ env.REGISTRY }}/${{ github.repository_owner }}/external-app"
+        IMAGE_PATH="${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.app }}"
         
         # Update deployment.yaml or kustomization.yaml
         if [ -f deployment-patch.yaml ]; then
           yq eval ".spec.template.spec.containers[0].image = \"${IMAGE_PATH}:${NEW_TAG}\"" -i deployment-patch.yaml
-          echo "🔄 Updated external-app-${{ matrix.environment }} image to ${IMAGE_PATH}:${NEW_TAG}"
+          echo "🔄 Updated ${{ matrix.app }}-${{ matrix.environment }} image to ${IMAGE_PATH}:${NEW_TAG}"
         elif [ -f kustomization.yaml ]; then
           yq eval ".images[0].newTag = \"${NEW_TAG}\"" -i kustomization.yaml
-          echo "🔄 Updated external-app-${{ matrix.environment }} via kustomization to ${NEW_TAG}"
+          echo "🔄 Updated ${{ matrix.app }}-${{ matrix.environment }} via kustomization to ${NEW_TAG}"
         else
-          echo "⚠️ No configuration file found for external-app-${{ matrix.environment }}"
+          echo "⚠️ No configuration file found for ${{ matrix.app }}-${{ matrix.environment }}"
         fi
         
     - name: 'Commit and push to config repository'
@@ -149,22 +155,22 @@ jobs:
           echo "No changes to commit"
         else
           git add .
-          git commit -m "🚀 Deploy external-app to ${{ matrix.environment }}: ${{ github.sha }}
+          git commit -m "🚀 Deploy ${{ matrix.app }} to ${{ matrix.environment }}: ${{ github.sha }}
           
           📊 Chapter 6 Thesis: Push-based cross-repository update
-          - App: external-app
+          - App: ${{ matrix.app }}
           - Environment: ${{ matrix.environment }}  
           - Source Commit: ${{ github.sha }}
           - Update Type: Cross-repository push
           - Timestamp: $(date -u)"
           
           git push
-          echo "✅ Config repository updated for external-app-${{ matrix.environment }}"
+          echo "✅ Config repository updated for ${{ matrix.app }}-${{ matrix.environment }}"
         fi
         
     - name: '📊 Chapter 6: Record cross-repo update completion'
       run: |
-        echo "🎯 Thesis Metric: Cross-repository update for external-app-${{ matrix.environment }} completed at $(date -u)"
+        echo "🎯 Thesis Metric: Cross-repository update for ${{ matrix.app }}-${{ matrix.environment }} completed at $(date -u)"
 
   # Chapter 6 Thesis: Force ArgoCD sync (Push-based approach)
   trigger-argocd-sync:
@@ -176,11 +182,12 @@ jobs:
     strategy:
       matrix:
         environment: [dev, qa, prod]
+        app: [app1, app2]
     
     steps:
     - name: '📊 Chapter 6: Trigger immediate sync'
       run: |
-        echo "🎯 Thesis Metric: Push-based immediate sync trigger for external-app-${{ matrix.environment }}"
+        echo "🎯 Thesis Metric: Push-based immediate sync trigger for ${{ matrix.app }}-${{ matrix.environment }}"
         echo "🚀 Push-based approach: Immediate deployment trigger"
         echo "⚡ Expected sync time: 10-30 seconds (immediate)"
         echo "📊 Thesis comparison: Push vs Pull sync timing"
@@ -193,7 +200,7 @@ jobs:
         echo "📊 CHAPTER 6 THESIS - EXTERNAL APP PIPELINE COMPLETE"
         echo "==============================================="
         echo "🚀 Pipeline Type: Push-based cross-repository GitOps"
-        echo "📦 Applications: external-app"
+        echo "📦 Applications: app1, app2"
         echo "🌍 Environments: dev, qa, prod"
         echo "⏱️ Total Pipeline Duration: ~3-7 minutes"
         echo "🎯 Thesis Metrics Generated:"
