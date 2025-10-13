@@ -1,0 +1,23 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: app2-dev
+
+resources:
+- ../../base
+- ingress.yaml
+
+images:
+- name: ghcr.io/triplom/app2
+  newName: ghcr.io/triplom/app2
+  newTag: latest
+  
+patchesStrategicMerge:
+- patches.yaml
+
+configMapGenerator:
+- name: app2-config
+  behavior: merge
+  literals:
+  - ENVIRONMENT=dev
+  - LOG_LEVEL=DEBUG
