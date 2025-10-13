@@ -13,10 +13,12 @@ def hello():
     env = os.getenv('ENV', 'unknown')
     logger.info(f"Hello endpoint accessed, environment: {env}")
     return jsonify({
-        "message": f"Hello from App1!",
+        "message": f"Hello from App1 - Chapter 6 Thesis Test!",
         "environment": env,
         "app": "app1",
-        "version": "1.0.0"
+        "version": "1.1.0",
+        "thesis_test": "Push-based GitOps evaluation",
+        "timestamp": "2025-10-13"
     })
 
 @app.route('/health')
