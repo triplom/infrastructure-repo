@@ -1,7 +1,8 @@
+# infrastructure-repo/apps/external-app1/overlays/qa/ingress.yaml
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: app1
+  name: external-app1
   annotations:
     kubernetes.io/ingress.class: "nginx"
     cert-manager.io/cluster-issuer: "letsencrypt-staging"
@@ -9,16 +10,16 @@ metadata:
 spec:
   tls:
   - hosts:
-    - app1-qa.gitops.local
-    secretName: app1-qa-tls
+    - external-app1-qa.gitops.local
+    secretName: external-app1-qa-tls
   rules:
-  - host: app1-qa.gitops.local
+  - host: external-app1-qa.gitops.local
     http:
       paths:
       - path: /
         pathType: Prefix
         backend:
           service:
-            name: app1
+            name: external-app1
             port:
               name: http

@@ -96,17 +96,13 @@ jobs:
     
     strategy:
       matrix:
+        app: [external-app1, external-app2]
         environment: [dev, qa, prod]
-        include:
-          - app_source: external-app1
-            app_target: external-app1
-          - app_source: external-app2  
-            app_target: external-app2
         
     steps:
     - name: '📊 Chapter 6: Record cross-repo update start'
       run: |
-        echo "🎯 Thesis Metric: Cross-repository update for ${{ matrix.app_target }}-${{ matrix.environment }} started at $(date -u)"
+        echo "🎯 Thesis Metric: Cross-repository update for ${{ matrix.app }}-${{ matrix.environment }} started at $(date -u)"
         
     - name: 'Checkout config repository'
       uses: actions/checkout@v4
@@ -119,20 +115,20 @@ jobs:
     - name: 'Update external app configuration'
       run: |
         # Create the target app directory if it doesn't exist
-        mkdir -p config-repo/apps/${{ matrix.app_target }}/overlays/${{ matrix.environment }}
+        mkdir -p config-repo/apps/${{ matrix.app }}/overlays/${{ matrix.environment }}
         
-        cd config-repo/apps/${{ matrix.app_target }}/overlays/${{ matrix.environment }}
+        cd config-repo/apps/${{ matrix.app }}/overlays/${{ matrix.environment }}
         
         # Get the new image tag
         NEW_TAG="${{ github.sha }}"
-        IMAGE_PATH="${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.app_source }}"
+        IMAGE_PATH="${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.app }}"
         
         # Update or create kustomization.yaml
         if [ -f kustomization.yaml ]; then
           yq eval ".images[0].newTag = \"main-${NEW_TAG}\"" -i kustomization.yaml
-          echo "🔄 Updated ${{ matrix.app_target }}-${{ matrix.environment }} image tag to main-${NEW_TAG}"
+          echo "🔄 Updated ${{ matrix.app }}-${{ matrix.environment }} image tag to main-${NEW_TAG}"
         else
-          echo "⚠️ No kustomization.yaml found for ${{ matrix.app_target }}-${{ matrix.environment }}"
+          echo "⚠️ No kustomization.yaml found for ${{ matrix.app }}-${{ matrix.environment }}"
           echo "📋 This is expected for new external applications"
         fi
         
@@ -146,17 +142,17 @@ jobs:
           echo "No changes to commit"
         else
           git add .
-          git commit -m "🚀 Deploy ${{ matrix.app_target }} to ${{ matrix.environment }}: ${{ github.sha }}
+          git commit -m "🚀 Deploy ${{ matrix.app }} to ${{ matrix.environment }}: ${{ github.sha }}
           
           📊 Chapter 6 Thesis: Push-based cross-repository update
-          - App: ${{ matrix.app_target }}
+          - App: ${{ matrix.app }}
           - Environment: ${{ matrix.environment }}  
           - Source Commit: ${{ github.sha }}
           - Update Type: Cross-repository push (external apps)
           - Timestamp: $(date -u)"
           
           git push
-          echo "✅ Config repository updated for ${{ matrix.app_target }}-${{ matrix.environment }}"
+          echo "✅ Config repository updated for ${{ matrix.app }}-${{ matrix.environment }}"
         fi
 
   # Chapter 6 Thesis: Demonstration of push-based sync approach  

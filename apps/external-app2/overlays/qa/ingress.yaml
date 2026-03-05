@@ -1,25 +1,25 @@
-# infrastructure-repo/apps/app2/overlays/dev/ingress.yaml
+# infrastructure-repo/apps/external-app2/overlays/qa/ingress.yaml
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: app2
+  name: external-app2
   annotations:
     kubernetes.io/ingress.class: "nginx"
-    cert-manager.io/cluster-issuer: "letsencrypt-staging" # Use staging for testing, then switch to prod
+    cert-manager.io/cluster-issuer: "letsencrypt-staging"
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
 spec:
   tls:
   - hosts:
-    - app2-dev.gitops.local
-    secretName: app2-dev-tls
+    - external-app2-qa.gitops.local
+    secretName: external-app2-qa-tls
   rules:
-  - host: app2-qa.gitops.local
+  - host: external-app2-qa.gitops.local
     http:
       paths:
       - path: /
         pathType: Prefix
         backend:
           service:
-            name: app2
+            name: external-app2
             port:
               number: 80

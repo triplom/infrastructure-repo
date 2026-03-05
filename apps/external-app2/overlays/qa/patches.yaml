@@ -1,20 +1,20 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: app2
+  name: external-app2
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: app2
+      app: external-app2
   template:
     metadata:
       labels:
-        app: app2
+        app: external-app2
     spec:
       containers:
-      - name: app2
-        image: ghcr.io/triplom/app2:latest  # Replace with your actual image path and tag
+      - name: external-app2
+        image: ghcr.io/triplom/external-app2:latest  # Replace with your actual image path and tag
         env:
         - name: ENVIRONMENT
           value: "Integration"

@@ -1,10 +1,10 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: app2
+  name: external-app2
 spec:
   selector:
-    app: app2
+    app: external-app2
   ports:
   - port: 80
     targetPort: 8000

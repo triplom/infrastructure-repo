@@ -1,16 +1,16 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: app1
+  name: external-app1
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: app1
+      app: external-app1
   template:
     spec:
       containers:
-      - name: app1
+      - name: external-app1
         env:
         - name: ENVIRONMENT
           value: "development"

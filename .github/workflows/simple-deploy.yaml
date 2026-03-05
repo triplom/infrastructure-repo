@@ -36,8 +36,13 @@ jobs:
           git commit -m "🚀 Deploy ${{ env.APP }} to ${{ env.ENVIRONMENT }} (tag: ${{ env.IMAGE_TAG }})" || echo "No changes to commit"
           git push
 
+      - name: Set up kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG_DATA }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
       - name: Deploy to cluster
         run: |
           echo "🚀 Deploying ${{ env.APP }} to ${{ env.ENVIRONMENT }} environment"
-          # In a real scenario, this would apply the manifests to the cluster
-          # kubectl apply -k apps/${{ env.APP }}/overlays/${{ env.ENVIRONMENT }}
+          kubectl apply -k apps/${{ env.APP }}/overlays/${{ env.ENVIRONMENT }}

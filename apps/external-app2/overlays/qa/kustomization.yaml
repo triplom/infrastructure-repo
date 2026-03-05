@@ -1,7 +1,7 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-namespace: app2-qa
+namespace: external-app2-qa
 
 resources:
 - ../../base
@@ -11,7 +11,7 @@ patchesStrategicMerge:
 - patches.yaml
 
 configMapGenerator:
-- name: app2-config
+- name: external-app2-config
   behavior: merge
   literals:
   - ENVIRONMENT=qa

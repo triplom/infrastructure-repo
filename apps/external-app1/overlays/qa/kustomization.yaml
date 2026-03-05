@@ -4,20 +4,20 @@ resources:
 - ../../base
 - ingress.yaml
 
-namespace: app1-qa
+namespace: external-app1-qa
 
 patches:
 - target:
     kind: Deployment
-    name: app1
+    name: external-app1
   patch: |-
-    - op: replace
+    - op: add
       path: /spec/template/spec/imagePullSecrets
       value:
       - name: github-registry-secret
 
 configMapGenerator:
-- name: app1-config
+- name: external-app1-config
   behavior: merge
   literals:
   - ENVIRONMENT=qa
