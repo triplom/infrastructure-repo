@@ -19,8 +19,7 @@ repositories/github-repo.yaml
 **/*credential*.yaml
 
 # Development tools
-.vscode/*
-!.vscode/extensions.json
+.vscode/
 .idea/
 *.swp
 *.swo
