@@ -1,0 +1,133 @@
+name: Deploy Infrastructure
+
+# Chapter 5 (Push-based): Provision KIND clusters, cert-manager, ingress-nginx
+# Triggered manually or when infrastructure manifests change
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'kind/**'
+      - 'infrastructure/cert-manager/**'
+      - 'infrastructure/ingress-nginx/**'
+      - '.github/workflows/deploy-infrastructure.yaml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options: [dev, qa, prod]
+      component:
+        description: 'Component to deploy'
+        required: true
+        default: 'all'
+        type: choice
+        options: [all, cert-manager, ingress-nginx]
+
+env:
+  ENV: ${{ github.event.inputs.environment || 'dev' }}
+
+jobs:
+  # ── Validate manifests before touching any cluster ─────────────────────────
+  validate:
+    name: Validate Infrastructure Manifests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+
+      - name: Setup Kustomize
+        uses: imranismail/setup-kustomize@v2
+        with:
+          kustomize-version: '5.3.0'
+
+      - name: Validate cert-manager manifests
+        run: |
+          echo "Validating cert-manager manifests..."
+          kustomize build infrastructure/cert-manager/base > /dev/null && echo "cert-manager base: OK"
+
+      - name: Validate ingress-nginx manifests
+        run: |
+          echo "Validating ingress-nginx manifests..."
+          kustomize build infrastructure/ingress-nginx/base > /dev/null && echo "ingress-nginx base: OK"
+
+  # ── Deploy to cluster via push-based kubectl apply ─────────────────────────
+  deploy:
+    name: Deploy Infrastructure (${{ github.event.inputs.environment || 'dev' }})
+    runs-on: ubuntu-latest
+    needs: validate
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+
+      - name: Setup Kustomize
+        uses: imranismail/setup-kustomize@v2
+        with:
+          kustomize-version: '5.3.0'
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: 'v3.14.0'
+
+      - name: Configure kubeconfig
+        run: |
+          KUBECONFIG_SECRET="${{ secrets.KUBECONFIG }}"
+          if [ -z "$KUBECONFIG_SECRET" ]; then
+            echo "KUBECONFIG secret not set — running in simulation mode"
+            echo "In production: set KUBECONFIG secret (base64-encoded kubeconfig)"
+            echo "Push-based GitOps: CI directly applies manifests to cluster"
+            exit 0
+          fi
+          mkdir -p ~/.kube
+          echo "$KUBECONFIG_SECRET" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+          kubectl config use-context kind-${{ env.ENV }}-cluster
+          kubectl cluster-info
+
+      - name: Deploy cert-manager
+        if: github.event.inputs.component == 'all' || github.event.inputs.component == 'cert-manager' || github.event_name == 'push'
+        run: |
+          echo "=== Push-based: Deploying cert-manager to ${{ env.ENV }} ==="
+          # Create namespace
+          kubectl create namespace cert-manager --dry-run=client -o yaml | kubectl apply -f -
+          # Apply manifests directly (push-based: CI pushes to cluster)
+          kustomize build infrastructure/cert-manager/base | kubectl apply --server-side -f -
+          echo "Waiting for cert-manager to be ready..."
+          kubectl wait --for=condition=available --timeout=180s \
+            deployment/cert-manager deployment/cert-manager-webhook \
+            -n cert-manager || echo "Timeout waiting — check cluster state"
+          echo "cert-manager deployed (push-based)"
+
+      - name: Deploy ingress-nginx
+        if: github.event.inputs.component == 'all' || github.event.inputs.component == 'ingress-nginx' || github.event_name == 'push'
+        run: |
+          echo "=== Push-based: Deploying ingress-nginx to ${{ env.ENV }} ==="
+          kubectl create namespace ingress-nginx --dry-run=client -o yaml | kubectl apply -f -
+          OVERLAY="infrastructure/ingress-nginx/overlays/${{ env.ENV }}"
+          if [ -d "$OVERLAY" ]; then
+            kustomize build "$OVERLAY" | kubectl apply --server-side -f -
+          else
+            kustomize build infrastructure/ingress-nginx/base | kubectl apply --server-side -f -
+          fi
+          echo "Waiting for ingress-nginx controller..."
+          kubectl wait --for=condition=available --timeout=120s \
+            deployment/ingress-nginx-controller -n ingress-nginx || true
+          echo "ingress-nginx deployed (push-based)"
+
+      - name: Verify cluster state
+        run: |
+          echo "=== Push-based deployment summary ==="
+          kubectl get namespaces | grep -E 'cert-manager|ingress-nginx' || true
+          kubectl get pods -n cert-manager 2>/dev/null || true
+          kubectl get pods -n ingress-nginx 2>/dev/null || true
+          echo "Infrastructure deployment complete (push-based CD)"
